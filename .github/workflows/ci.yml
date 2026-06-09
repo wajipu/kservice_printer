@@ -49,7 +49,17 @@ jobs:
       - name: Rust info
         run: rustc --version && cargo --version
 
-      - name: Rust test
+      - name: Rust compile test
+        run: cargo test --no-run --manifest-path rust_printer_core/Cargo.toml 2>&1 | tee /tmp/cargo_build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-build-log
+          path: /tmp/cargo_build.log
+
+      - name: Rust run test
         run: cargo test --manifest-path rust_printer_core/Cargo.toml
 
       - name: Dart analyze
