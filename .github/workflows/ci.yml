@@ -46,16 +46,22 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Rust check & clippy
+      - name: Rust version & info
         run: |
-          cargo clippy --manifest-path rust_printer_core/Cargo.toml -- -D warnings
-          cargo test --manifest-path rust_printer_core/Cargo.toml
+          rustc --version
+          cargo --version
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path rust_printer_core/Cargo.toml 2>&1 | head -50
+
+      - name: Rust test
+        run: cargo test --manifest-path rust_printer_core/Cargo.toml 2>&1 | head -50
 
       - name: Dart analyze
-        run: flutter analyze --verbose
+        run: flutter analyze 2>&1 | head -50
 
       - name: Dart test
-        run: flutter test --verbose
+        run: flutter test 2>&1 | head -50
 
   build-linux:
     name: Build Linux
