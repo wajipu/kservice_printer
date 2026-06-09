@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   lint-test:
-    name: Lint & Test (Linux)
+    name: Lint & Test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -43,25 +43,20 @@ jobs:
           key: pub-${{ hashFiles('pubspec.yaml', 'pubspec.lock') }}
           restore-keys: pub-
 
-      - name: Install dependencies
+      - name: Install deps
         run: flutter pub get
 
-      - name: Rust version & info
-        run: |
-          rustc --version
-          cargo --version
-
       - name: Rust clippy
-        run: cargo clippy --manifest-path rust_printer_core/Cargo.toml 2>&1 | head -50
+        run: cargo clippy --manifest-path rust_printer_core/Cargo.toml -- -D warnings
 
       - name: Rust test
-        run: cargo test --manifest-path rust_printer_core/Cargo.toml 2>&1 | head -50
+        run: cargo test --manifest-path rust_printer_core/Cargo.toml
 
       - name: Dart analyze
-        run: flutter analyze 2>&1 | head -50
+        run: flutter analyze
 
       - name: Dart test
-        run: flutter test 2>&1 | head -50
+        run: flutter test
 
   build-linux:
     name: Build Linux
@@ -70,12 +65,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake clang libgtk-3-dev liblzma-dev
+          sudo apt-get install -y cmake clang libgtk-3-dev liblzma-dev libudev-dev ninja-build pkg-config
 
-      - name: Install Rust (Linux targets)
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
@@ -92,7 +87,7 @@ jobs:
         working-directory: example
         run: flutter pub get
 
-      - name: Build example (Linux)
+      - name: Build example
         working-directory: example
         run: flutter build linux --release
 
@@ -103,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (macOS targets)
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
@@ -116,11 +111,14 @@ jobs:
         with:
           channel: stable
 
+      - name: Enable SPM
+        run: flutter config --enable-swift-package-manager
+
       - name: Install example deps
         working-directory: example
         run: flutter pub get
 
-      - name: Build example (macOS)
+      - name: Build example
         working-directory: example
         run: flutter build macos --release
 
@@ -131,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (Windows targets)
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
@@ -148,7 +146,7 @@ jobs:
         working-directory: example
         run: flutter pub get
 
-      - name: Build example (Windows)
+      - name: Build example
         working-directory: example
         run: flutter build windows --release
 
@@ -169,12 +167,8 @@ jobs:
         with:
           workspaces: rust_printer_core
 
-      - name: Install Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r27c
-          link-to-sdk: true
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -187,12 +181,14 @@ jobs:
         with:
           channel: stable
 
+      - name: Accept Android licenses
+        run: |
+          yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses || true
+
       - name: Install example deps
         working-directory: example
         run: flutter pub get
 
-      - name: Build example (Android APK)
+      - name: Build example (APK)
         working-directory: example
         run: flutter build apk --release
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
