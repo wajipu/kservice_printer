@@ -1,4 +1,4 @@
-use escpos::driver::{Driver, NativeUsbDriver, SerialPortDriver};
+use escpos::driver::{Driver, SerialPortDriver, UsbDriver};
 use escpos::errors::PrinterError as EscposError;
 use escpos::printer::Printer;
 use escpos::utils::*;
@@ -41,7 +41,7 @@ impl Driver for VecDriver {
 
 enum AnyDriver {
     Tcp(TcpDriver),
-    Usb(NativeUsbDriver),
+    Usb(UsbDriver),
     Serial(SerialPortDriver),
 }
 
@@ -188,7 +188,7 @@ fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError
             Ok(AnyDriver::Tcp(driver))
         }
         PrinterConnection::Usb { vendor_id, product_id } => {
-            let driver = NativeUsbDriver::open(*vendor_id, *product_id)
+            let driver = UsbDriver::open(*vendor_id, *product_id, None, None)
                 .map_err(|e| PrinterError::Connect(e.to_string()))?;
             Ok(AnyDriver::Usb(driver))
         }
