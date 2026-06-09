@@ -1,15 +1,21 @@
 PODS:
   - FlutterMacOS (1.0.0)
+  - kservice_printer (0.0.1):
+    - FlutterMacOS
 
 DEPENDENCIES:
   - FlutterMacOS (from `Flutter/ephemeral`)
+  - kservice_printer (from `Flutter/ephemeral/.symlinks/plugins/kservice_printer/macos`)
 
 EXTERNAL SOURCES:
   FlutterMacOS:
     :path: Flutter/ephemeral
+  kservice_printer:
+    :path: Flutter/ephemeral/.symlinks/plugins/kservice_printer/macos
 
 SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  kservice_printer: 69fc850088ed16b29a77b52f528e0639c2a2a0b9
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
 

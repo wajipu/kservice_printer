@@ -6,7 +6,11 @@ pub enum PrinterConnection {
     /// host: IP 或主机名
     /// port: 端口号，常见 9100
     /// timeout_ms: 连接超时毫秒数
-    Network { host: String, port: u16, timeout_ms: u64 },
+    Network {
+        host: String,
+        port: u16,
+        timeout_ms: u64,
+    },
     /// USB 打印机。
     /// vendor_id: USB 厂商 ID（十六进制，如 0x0525）
     /// product_id: USB 产品 ID（十六进制，如 0xa700）
@@ -27,6 +31,10 @@ pub fn print_receipt(
 
 pub fn render_receipt(template_json: String, data_json: String) -> String {
     engine::render_receipt(&template_json, &data_json)
+}
+
+pub fn list_usb_printers() -> String {
+    engine::list_usb_printers()
 }
 
 #[flutter_rust_bridge::frb(init)]

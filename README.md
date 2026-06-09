@@ -1,8 +1,6 @@
 # kservice_printer
 
-[![CI](https://github.com/your-org/kservice_printer/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/kservice_printer/actions/workflows/ci.yml)
-
-Flutter + Rust 跨平台打印插件，面向餐饮 SaaS/POS 订单小票打印。
+Flutter + Rust 跨平台打印插件，面向 SaaS/POS 订单小票、后厨单、标签等 ESC/POS 打印。
 
 ## 能力
 
@@ -11,6 +9,8 @@ Flutter + Rust 跨平台打印插件，面向餐饮 SaaS/POS 订单小票打印�
 - 三种连接方式：**Network**（TCP/IP）、**USB**、**Serial**（串口）
 - JSON 模板 + Handlebars 动态数据（`{{store.name}}` 语法）
 - 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex
+- 内置打印类型：订单小票、后厨打印、标签打印、预结账单、退款/退菜单、外卖/配送单、自定义打印
+- 内置 58mm/80mm 小票模板选择，适合 POS 设置页或打印前选择
 - `renderReceipt` 调试模式返回十六进制字节，不下发打印机
 
 ## 架构
@@ -70,6 +70,278 @@ final job = PrintJob(
 final result = await printReceipt(job);
 ```
 
+`defaultOrderReceiptTemplate()` 只是内置默认模板，不是固定格式。`PrintJob.template` 可以换成任意自定义 `ReceiptTemplate`，`PrintJob.data` 只负责提供模板变量。
+
+例如只打印单号和合计：
+
+```dart
+final job = PrintJob(
+  connection: const PrinterConnection.network(host: '192.168.1.100', port: 9100, timeoutMs: 3000),
+  template: const ReceiptTemplate(
+    width: 32,
+    elements: [
+      {'type': 'text', 'value': '{{store.name}}', 'align': 'center', 'bold': true},
+      {'type': 'divider'},
+      {'type': 'row', 'left': '单号', 'right': '{{order.no}}'},
+      {'type': 'row', 'left': '合计', 'right': '{{order.total}}', 'bold': true},
+      {'type': 'feed', 'lines': 3},
+      {'type': 'cut'},
+    ],
+  ),
+  data: {
+    'store': {'name': 'KService 餐厅'},
+    'order': {'no': 'A001', 'total': '¥128.00'},
+  },
+);
+
+await printReceipt(job);
+```
+
+也可以把模板保存成 JSON，由服务端或本地配置下发；只要最终传入 `ReceiptTemplate(width, encoding, elements)` 即可。
+
+### 打印队列
+
+`printReceipt(job)` 默认会进入 Dart 侧打印队列。同一台打印机按连接信息串行执行，不同打印机可以并行执行：
+
+```dart
+await printReceipt(job); // 默认 queued: true
+```
+
+如果调用方已经自行保证串行，可以绕过队列：
+
+```dart
+await printReceiptNow(job);
+// 或
+await printReceipt(job, queued: false);
+```
+
+图片小票建议把“生成图片 + 打印”整体放进队列，避免高并发时同时生成大量 PNG/base64：
+
+```dart
+final connection = const PrinterConnection.usb(vendorId: 0x0483, productId: 0x070B);
+
+await enqueuePrintReceipt(
+  connection: connection,
+  buildJob: () async {
+    final pngBytes = await buildReceiptPng(order); // Flutter Canvas/RepaintBoundary
+    final imageBase64 = base64Encode(pngBytes);
+
+    return PrintJob(
+      connection: connection,
+      template: const ReceiptTemplate(
+        width: 32,
+        elements: [
+          {
+            'type': 'image',
+            'base64': '{{receipt.imageBase64}}',
+            'max_width': 384,
+            'align': 'center',
+          },
+          {'type': 'feed', 'lines': 3},
+          {'type': 'cut'},
+        ],
+      ),
+      data: {
+        'receipt': {'imageBase64': imageBase64},
+      },
+    );
+  },
+);
+```
+
+可以用 `activePrintQueueCount` 观察当前还有多少个打印机队列未完成。队列只保证单进程内的 Dart 调用串行；如果有多个 App 实例或多个进程同时写同一台打印机，仍需要在业务层做互斥。
+
+### 模板选择
+
+```dart
+// 58mm 小票，约 32 列
+final receipt58 = defaultTemplateForPrintJobType(
+  PrintJobType.receipt,
+  paperSize: ReceiptPaperSize.mm58,
+);
+
+// 80mm 小票，约 48 列
+final receipt80 = defaultTemplateForPrintJobType(
+  PrintJobType.receipt,
+  paperSize: ReceiptPaperSize.mm80,
+);
+
+// 打印机字体不支持维吾尔语、阿拉伯语等复杂文字时，选择图片打印
+final minorityLanguageReceipt = defaultTemplateForPrintJobType(
+  PrintJobType.receipt,
+  paperSize: ReceiptPaperSize.mm58,
+  mode: ReceiptPrintMode.image,
+  fontFamily: 'Noto Sans Arabic',
+  fontSize: 26,
+);
+
+// 也可以直接把内置选项绑定到下拉框/设置页
+for (final option in builtInReceiptTemplateOptions) {
+  print('${option.code}: ${option.displayName}');
+}
+
+final selected = builtInReceiptTemplateOptions.first;
+final job = PrintJob(
+  type: selected.type,
+  connection: const PrinterConnection.network(host: '192.168.1.100', port: 9100, timeoutMs: 3000),
+  template: selected.buildTemplate(),
+  data: data,
+);
+```
+
+模板 JSON 也可以直接声明纸宽：
+
+```json
+{
+  "paperSize": 58,
+  "elements": [
+    {"type": "text", "value": "{{store.name}}", "align": "center"},
+    {"type": "divider"},
+    {"type": "row", "left": "合计", "right": "{{order.total}}"}
+  ]
+}
+```
+
+支持 `paperSize` / `paper_size`，值可以是 `58`、`80`、`"58mm"`、`"80mm"`。如果同时设置 `width`，则以 `width` 为准。
+
+如果打印机不支持某些语言的文本编码，可以在模板 JSON 里打开图片打印：
+
+```json
+{
+  "paperSize": 58,
+  "encoding": "image",
+  "fontFamily": "Noto Sans Arabic",
+  "fontSize": 26,
+  "elements": [
+    {"type": "text", "value": "{{store.name}}", "align": "center"},
+    {"type": "row", "left": "زاكاز", "right": "{{order.no}}"},
+    {"type": "divider"},
+    {"type": "row", "left": "جەمئىي", "right": "{{order.total}}"}
+  ]
+}
+```
+
+`encoding: "image"` 会把整张小票生成临时 PNG，再用 ESC/POS 图片指令打印；临时图片会在打印流程结束或出错时自动删除。`fontFamily` 使用系统字体名，不传时走系统默认 fallback；`fontSize` 会限制在 12 到 72 之间，避免异常字号导致图片过大。二维码、条码和 raw 指令不会进入整票图片模式，复杂票据建议单独测试。
+
+### 图片打印模式
+
+图片打印适合打印机字库不支持的内容，例如维吾尔语、阿拉伯语等需要复杂连写的文字。推荐优先在 Flutter 侧生成整张小票图片，再把 PNG bytes 作为 base64 传给 Rust；Rust 只负责读取图片尺寸、按比例计算高度并发送 ESC/POS 图片指令。这样字体、字号、行距和布局都由 Flutter 控制，预览和实际打印更一致。
+
+58mm 打印机建议图片宽度使用 `384px`；80mm 打印机建议使用 `576px`。高度不需要写死，按内容自然撑开即可。
+
+#### Flutter 生成图片流
+
+Flutter 端可以用 `Canvas`、`PictureRecorder` 或 `RepaintBoundary` 生成 PNG。生成后把 `Uint8List` 转成 base64：
+
+```dart
+import 'dart:convert';
+
+final imageBase64 = base64Encode(pngBytes);
+
+final job = PrintJob(
+  connection: const PrinterConnection.usb(vendorId: 0x0483, productId: 0x070B),
+  template: const ReceiptTemplate(
+    width: 32,
+    elements: [
+      {
+        'type': 'image',
+        'base64': '{{receipt.imageBase64}}',
+        'max_width': 384,
+        'align': 'center',
+      },
+      {'type': 'feed', 'lines': 3},
+      {'type': 'cut'},
+    ],
+  ),
+  data: {
+    'receipt': {'imageBase64': imageBase64},
+  },
+);
+
+await printReceipt(job);
+```
+
+`base64` 也支持 data URL：
+
+```json
+{
+  "type": "image",
+  "base64": "data:image/png;base64,iVBORw0KGgo...",
+  "max_width": 384,
+  "align": "center"
+}
+```
+
+#### 打印本地图片文件
+
+如果已经有图片文件，也可以传路径：
+
+```json
+{
+  "type": "image",
+  "path": "{{receipt.imagePath}}",
+  "max_width": 384,
+  "align": "center"
+}
+```
+
+```dart
+data: {
+  'receipt': {'imagePath': '/path/to/receipt.png'},
+}
+```
+
+#### 高度控制
+
+`image` 节点支持 `max_width` 和 `max_height`：
+
+```json
+{
+  "type": "image",
+  "base64": "{{receipt.imageBase64}}",
+  "max_width": 384,
+  "max_height": 720,
+  "align": "center"
+}
+```
+
+- 不传 `max_height`：Rust 自动读取图片真实宽高，按 `max_width` 等比例计算高度。
+- 传 `max_height`：按 JSON 指定高度限制图片。
+- 宽高会自动补齐到 8 的倍数，避免 ESC/POS 图片指令报错。
+
+通常不要手动写死高度。更推荐 Flutter 直接生成目标宽度的图片，例如 58mm 生成 `384px` 宽，字号和行距在 Flutter 中调整，高度由内容决定。
+
+### 打印类型
+
+```dart
+// 后厨打印
+final kitchenJob = PrintJob(
+  type: PrintJobType.kitchen,
+  connection: const PrinterConnection.network(host: '192.168.1.100', port: 9100, timeoutMs: 3000),
+  template: defaultKitchenTicketTemplate(),
+  data: {
+    'order': {'no': 'K001', 'table': 'A08', 'time': '12:30', 'mealType': '堂食', 'remark': '加急'},
+    'items': [
+      {'name': '招牌牛肉饭', 'qty': '2', 'spec': '少辣', 'remark': '不要香菜'},
+    ],
+  },
+);
+
+// 标签打印
+final labelJob = PrintJob(
+  type: PrintJobType.label,
+  connection: const PrinterConnection.network(host: '192.168.1.101', port: 9100, timeoutMs: 3000),
+  template: defaultLabelTemplate(),
+  data: {
+    'item': {'name': '招牌牛肉饭', 'spec': '中份', 'sku': 'BEEF-001', 'qty': '1', 'price': '¥29.00'},
+    'label': {'remark': '冷藏保存'},
+  },
+);
+
+await printJob(kitchenJob);
+await printJob(labelJob);
+```
+
 ### 调试（不连接打印机）
 
 ```dart
@@ -88,6 +360,8 @@ print('ESC/POS bytes: ${result.hex}');
 {"type":"feed","lines":3}
 {"type":"cut"}
 {"type":"raw","hex":"1b4501"}
+{"type":"image","path":"{{receipt.imagePath}}","max_width":384,"align":"center"}
+{"type":"image","base64":"{{receipt.imageBase64}}","max_width":384,"align":"center"}
 ```
 
 ## 验证

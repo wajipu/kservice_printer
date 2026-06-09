@@ -26,6 +26,9 @@ Future<String> renderReceipt({
   dataJson: dataJson,
 );
 
+Future<String> listUsbPrinters() =>
+    RustLib.instance.api.crateApiPrinterListUsbPrinters();
+
 @freezed
 sealed class PrinterConnection with _$PrinterConnection {
   const PrinterConnection._();
