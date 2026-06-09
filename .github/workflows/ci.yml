@@ -199,6 +199,14 @@ jobs:
         run: |
           yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses || true
 
+      - name: Install NDK
+        run: |
+          yes | $ANDROID_HOME/tools/bin/sdkmanager "ndk;28.2.13676358" || true
+
+      - name: Set NDK env
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> $GITHUB_ENV
+
       - name: Install example deps
         working-directory: example
         run: flutter pub get
