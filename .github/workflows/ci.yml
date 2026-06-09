@@ -51,10 +51,11 @@ jobs:
           cargo clippy --manifest-path rust_printer_core/Cargo.toml -- -D warnings
           cargo test --manifest-path rust_printer_core/Cargo.toml
 
-      - name: Dart analyze & test
-        run: |
-          flutter analyze
-          flutter test
+      - name: Dart analyze
+        run: flutter analyze --verbose
+
+      - name: Dart test
+        run: flutter test --verbose
 
   build-linux:
     name: Build Linux
