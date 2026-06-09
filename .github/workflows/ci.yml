@@ -46,11 +46,8 @@ jobs:
       - name: Install deps
         run: flutter pub get
 
-      - name: Rust version
+      - name: Rust info
         run: rustc --version && cargo --version
-
-      - name: Rust check
-        run: cargo check --manifest-path rust_printer_core/Cargo.toml
 
       - name: Rust test
         run: cargo test --manifest-path rust_printer_core/Cargo.toml
