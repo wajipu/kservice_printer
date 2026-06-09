@@ -58,10 +58,19 @@ jobs:
         run: cargo test --manifest-path rust_printer_core/Cargo.toml
 
       - name: Dart analyze
-        run: flutter analyze
+        run: flutter analyze 2>&1 | tee /tmp/flutter_analyze.log
 
       - name: Dart test
-        run: flutter test
+        run: flutter test 2>&1 | tee /tmp/flutter_test.log
+
+      - name: Upload CI logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            /tmp/flutter_analyze.log
+            /tmp/flutter_test.log
 
   build-linux:
     name: Build Linux
