@@ -46,8 +46,11 @@ jobs:
       - name: Install deps
         run: flutter pub get
 
+      - name: Rust version
+        run: rustc --version && cargo --version
+
       - name: Rust clippy
-        run: cargo clippy --manifest-path rust_printer_core/Cargo.toml 2>&1
+        run: cargo clippy --no-deps --manifest-path rust_printer_core/Cargo.toml 2>&1
 
       - name: Rust test
         run: cargo test --manifest-path rust_printer_core/Cargo.toml
