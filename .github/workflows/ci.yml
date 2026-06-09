@@ -197,15 +197,29 @@ jobs:
 
       - name: Accept Android licenses
         run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || \
           yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses || true
 
       - name: Install NDK
         run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "ndk;28.2.13676358" || \
           yes | $ANDROID_HOME/tools/bin/sdkmanager "ndk;28.2.13676358" || true
 
       - name: Set NDK env
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> $GITHUB_ENV
+          NDK_DIR=""
+          if [ -d "$ANDROID_SDK_ROOT/ndk/28.2.13676358" ]; then
+            NDK_DIR="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
+          elif [ -d "$ANDROID_HOME/ndk/28.2.13676358" ]; then
+            NDK_DIR="$ANDROID_HOME/ndk/28.2.13676358"
+          elif [ -d "$ANDROID_SDK_ROOT/ndk/" ]; then
+            NDK_DIR=$(ls -d "$ANDROID_SDK_ROOT/ndk/"*/ 2>/dev/null | head -1)
+          fi
+          if [ -n "$NDK_DIR" ]; then
+            echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          else
+            echo "WARNING: No NDK found"
+          fi
 
       - name: Install example deps
         working-directory: example
