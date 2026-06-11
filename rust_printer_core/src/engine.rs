@@ -918,7 +918,10 @@ fn render_element<D: Driver>(
             bold,
             size,
         } => {
-            let text = render_value(handlebars, value, data)?;
+            let text = render_text_value(handlebars, value, data, encoding)?;
+            if text.trim().is_empty() {
+                return Ok(());
+            }
             printer.bold(*bold)?;
             if matches!(size, TextSize::Double) {
                 printer.size(2, 2)?;
@@ -931,9 +934,10 @@ fn render_element<D: Driver>(
             printer.bold(false)?;
         }
         Element::Row { left, right, bold } => {
-            let l = render_value(handlebars, left, data)?;
-            let r = render_value(handlebars, right, data)?;
+            let l = render_text_value(handlebars, left, data, encoding)?;
+            let r = render_text_value(handlebars, right, data, encoding)?;
             printer.bold(*bold)?;
+            printer.justify(JustifyMode::LEFT)?;
             for line in format_row(&l, &r, line_width) {
                 print_text_line(printer, &line, encoding)?;
             }
@@ -943,15 +947,19 @@ fn render_element<D: Driver>(
             let mut items = Vec::new();
             let bold = columns.iter().any(|col| col.bold);
             for col in columns {
-                let value = render_value(handlebars, &col.value, data)?;
-                items.push(fit_text(&value, col.width, col.align));
+                let value = render_text_value(handlebars, &col.value, data, encoding)?;
+                items.push((value, col.width, col.align));
             }
             printer.bold(bold)?;
-            print_text_line(printer, &items.join(""), encoding)?;
+            printer.justify(JustifyMode::LEFT)?;
+            for line in format_columns(&items) {
+                print_text_line(printer, &line, encoding)?;
+            }
             printer.bold(false)?;
         }
         Element::Divider { ch } => {
             let token = ch.chars().next().unwrap_or('-');
+            printer.justify(JustifyMode::LEFT)?;
             print_text_line(printer, &repeat_to_width(token, line_width), encoding)?;
         }
         Element::Feed { lines } => {
@@ -1079,9 +1087,9 @@ fn collect_image_lines(
                 let mut items = Vec::new();
                 for col in columns {
                     let value = render_value(handlebars, &col.value, data)?;
-                    items.push(fit_text(&value, col.width, col.align));
+                    items.push((value, col.width, col.align));
                 }
-                lines.push(items.join(""));
+                lines.extend(format_columns(&items));
             }
             Element::Divider { ch } => {
                 let token = ch.chars().next().unwrap_or('-');
@@ -1286,7 +1294,7 @@ fn encode_printer_text(text: &str, encoding: &str) -> Result<Vec<u8>, PrinterErr
     }
 
     if matches!(normalized_encoding.as_str(), "gbk" | "gb2312" | "cp936") {
-        let normalized = text.replace('¥', "￥");
+        let normalized = normalize_text_for_encoding(text, encoding);
         let (encoded, _, had_errors) = GBK.encode(&normalized);
         if had_errors {
             return Err(PrinterError::Encode("GBK 不支持部分字符".into()));
@@ -1330,6 +1338,75 @@ fn format_row(left: &str, right: &str, line_width: usize) -> Vec<String> {
         fit_text(left, line_width, Align::Left),
         fit_text(right, line_width, Align::Right),
     ]
+}
+
+fn format_columns(columns: &[(String, usize, Align)]) -> Vec<String> {
+    if columns.is_empty() {
+        return Vec::new();
+    }
+
+    let wrapped = columns
+        .iter()
+        .map(|(value, width, _)| wrap_text_to_width(value, *width))
+        .collect::<Vec<_>>();
+    let row_count = wrapped.iter().map(Vec::len).max().unwrap_or(0);
+    let mut rows = Vec::new();
+
+    for row_index in 0..row_count {
+        let mut row = String::new();
+        for (column_index, (_, width, align)) in columns.iter().enumerate() {
+            let value = wrapped[column_index]
+                .get(row_index)
+                .map(String::as_str)
+                .unwrap_or("");
+            row.push_str(&fit_text(value, *width, *align));
+        }
+        if !row.trim().is_empty() {
+            rows.push(row);
+        }
+    }
+
+    rows
+}
+
+fn wrap_text_to_width(value: &str, width: usize) -> Vec<String> {
+    if width == 0 || value.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    for source_line in value.lines() {
+        let mut current = String::new();
+        let mut used = 0;
+        for ch in source_line.chars() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if char_width == 0 {
+                current.push(ch);
+                continue;
+            }
+            if char_width > width {
+                if !current.is_empty() {
+                    lines.push(current);
+                    current = String::new();
+                    used = 0;
+                }
+                continue;
+            }
+            if used + char_width > width {
+                lines.push(current);
+                current = String::new();
+                used = 0;
+            }
+            current.push(ch);
+            used += char_width;
+        }
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn fit_text(value: &str, width: usize, align: Align) -> String {
@@ -1385,6 +1462,25 @@ fn repeat_to_width(ch: char, width: usize) -> String {
 
 fn display_width(value: &str) -> usize {
     UnicodeWidthStr::width(value)
+}
+
+fn render_text_value(
+    handlebars: &Handlebars,
+    tmpl: &str,
+    data: &Value,
+    encoding: &str,
+) -> Result<String, PrinterError> {
+    let value = render_value(handlebars, tmpl, data)?;
+    Ok(normalize_text_for_encoding(&value, encoding))
+}
+
+fn normalize_text_for_encoding(text: &str, encoding: &str) -> String {
+    let normalized_encoding = encoding.trim().to_ascii_lowercase().replace('-', "");
+    if matches!(normalized_encoding.as_str(), "gbk" | "gb2312" | "cp936") {
+        text.replace('¥', "￥")
+    } else {
+        text.to_string()
+    }
 }
 
 fn render_value(handlebars: &Handlebars, tmpl: &str, data: &Value) -> Result<String, PrinterError> {
@@ -1543,6 +1639,35 @@ mod tests {
         assert_eq!(display_width(&name), 8);
         assert_eq!(amount, "  ¥58.00");
         assert_eq!(display_width(&line), 16);
+    }
+
+    #[test]
+    fn formats_columns_with_gbk_currency_width() {
+        let amount = normalize_text_for_encoding("¥58.00", "gbk");
+        let lines = format_columns(&[
+            ("招牌牛肉饭".to_string(), 16, Align::Left),
+            ("2".to_string(), 6, Align::Right),
+            (amount, 10, Align::Right),
+        ]);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(display_width(&lines[0]), 32);
+        assert!(lines[0].ends_with("￥58.00"));
+    }
+
+    #[test]
+    fn wraps_long_column_values_without_moving_amount() {
+        let lines = format_columns(&[
+            ("超长招牌牛肉饭大份".to_string(), 12, Align::Left),
+            ("2".to_string(), 6, Align::Right),
+            ("￥58.00".to_string(), 10, Align::Right),
+        ]);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(display_width(&lines[0]), 28);
+        assert_eq!(display_width(&lines[1]), 28);
+        assert!(lines[0].contains("￥58.00"));
+        assert!(!lines[1].contains("￥58.00"));
     }
 
     #[test]
