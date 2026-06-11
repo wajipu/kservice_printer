@@ -13,7 +13,7 @@ Flutter FFI plugin for kservice printer.
 
   s.dependency 'FlutterMacOS'
   s.platform = :osx, '10.15'
-  s.libraries = 'usb-1.0'
+  s.frameworks = 'CoreFoundation', 'IOKit', 'Security'
 
   s.script_phase = {
     :name => 'Build kservice_printer_core',
@@ -28,13 +28,7 @@ Flutter FFI plugin for kservice printer.
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
-    'HEADER_SEARCH_PATHS' => '$(inherited) /opt/homebrew/include /opt/homebrew/opt/libusb/include /usr/local/include /usr/local/opt/libusb/include',
-    'LIBRARY_SEARCH_PATHS' => '$(inherited) /opt/homebrew/lib /opt/homebrew/opt/libusb/lib /usr/local/lib /usr/local/opt/libusb/lib',
-    'OTHER_LDFLAGS' => '$(inherited) -L/opt/homebrew/lib -L/opt/homebrew/opt/libusb/lib -L/usr/local/lib -L/usr/local/opt/libusb/lib -force_load $(PODS_CONFIGURATION_BUILD_DIR)/$(PRODUCT_NAME)/libkservice_printer_core.a -lusb-1.0',
-  }
-  s.user_target_xcconfig = {
-    'LIBRARY_SEARCH_PATHS' => '$(inherited) /opt/homebrew/lib /opt/homebrew/opt/libusb/lib /usr/local/lib /usr/local/opt/libusb/lib',
-    'OTHER_LDFLAGS' => '$(inherited) -L/opt/homebrew/lib -L/opt/homebrew/opt/libusb/lib -L/usr/local/lib -L/usr/local/opt/libusb/lib -lusb-1.0',
+    'OTHER_LDFLAGS' => '$(inherited) -force_load $(PODS_CONFIGURATION_BUILD_DIR)/$(PRODUCT_NAME)/libkservice_printer_core.a',
   }
   s.swift_version = '5.0'
 end
