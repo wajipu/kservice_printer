@@ -1955,8 +1955,9 @@ mod tests {
 
     fn create_test_logo() -> String {
         let path = std::env::temp_dir().join(format!(
-            "kservice-printer-test-logo-{}.png",
-            std::process::id()
+            "kservice-printer-test-logo-{}-{}.png",
+            std::process::id(),
+            unique_temp_suffix()
         ));
         let mut image = image::GrayImage::from_pixel(128, 48, image::Luma([255]));
         for x in 0..128 {
