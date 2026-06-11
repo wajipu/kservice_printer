@@ -230,6 +230,94 @@ class PrintJob {
   final Map<String, Object?> data;
 }
 
+/// 租户/门店下的一台打印机业务绑定。
+///
+/// 一个绑定可以覆盖多个票据类型；如果 [template] 为空，分发时会按票据类型使用默认模板。
+/// 同一台物理打印机可以配置多条绑定，用于不同票据类型或不同区域标签。
+class PrinterBinding {
+  const PrinterBinding({
+    required this.id,
+    required this.connection,
+    this.name,
+    this.tenantId,
+    this.storeId,
+    this.types = const <PrintJobType>[],
+    this.tags = const <String>[],
+    this.template,
+    this.enabled = true,
+  });
+
+  /// 绑定 ID，建议使用业务系统里的打印机绑定主键。
+  final String id;
+
+  /// UI 展示名称，例如“收银台”“后厨热菜”“吧台”。
+  final String? name;
+
+  /// 绑定所属租户；为空表示全局绑定。
+  final String? tenantId;
+
+  /// 绑定所属门店；为空表示租户下全门店可用。
+  final String? storeId;
+
+  /// 打印机连接信息。
+  final PrinterConnection connection;
+
+  /// 该绑定可处理的票据类型；为空表示不限制类型。
+  final List<PrintJobType> types;
+
+  /// 业务标签，例如 `cashier`、`kitchen`、`bar`、`drink`。
+  final List<String> tags;
+
+  /// 该绑定使用的模板；为空时按 [PrintJobType] 使用默认模板。
+  final ReceiptTemplate? template;
+
+  /// false 时分发会跳过该绑定。
+  final bool enabled;
+
+  bool matches({
+    required PrintJobType type,
+    Iterable<String> tags = const <String>[],
+    String? tenantId,
+    String? storeId,
+  }) {
+    if (!enabled) {
+      return false;
+    }
+    if (this.tenantId != null && this.tenantId != tenantId) {
+      return false;
+    }
+    if (this.storeId != null && this.storeId != storeId) {
+      return false;
+    }
+    if (types.isNotEmpty && !types.contains(type)) {
+      return false;
+    }
+
+    final requestedTags = tags.toSet();
+    if (requestedTags.isEmpty) {
+      return true;
+    }
+    if (this.tags.isEmpty) {
+      return false;
+    }
+    return this.tags.any(requestedTags.contains);
+  }
+
+  PrintJob buildJob({
+    required PrintJobType type,
+    required Map<String, Object?> data,
+    ReceiptTemplate? fallbackTemplate,
+  }) {
+    return PrintJob(
+      connection: connection,
+      type: type,
+      template:
+          template ?? fallbackTemplate ?? defaultTemplateForPrintJobType(type),
+      data: data,
+    );
+  }
+}
+
 /// 打印执行结果。
 class PrintResult {
   const PrintResult({
@@ -255,6 +343,23 @@ class PrintResult {
       error: json['error']?.toString(),
     );
   }
+}
+
+/// 多打印机分发后的单台打印机结果。
+class PrintDispatchResult {
+  const PrintDispatchResult({
+    required this.binding,
+    required this.job,
+    required this.result,
+  });
+
+  final PrinterBinding binding;
+  final PrintJob job;
+  final PrintResult result;
+
+  String get targetId => binding.id;
+
+  bool get ok => result.ok;
 }
 
 /// 模板渲染结果。
@@ -692,6 +797,94 @@ Future<RenderResult> renderReceipt(PrintJob job) async {
 /// 按任务类型打印。兼容所有模板类型，底层仍使用 ESC/POS 模板渲染。
 Future<PrintResult> printJob(PrintJob job, {bool queued = true}) =>
     printReceipt(job, queued: queued);
+
+/// 根据租户、门店、票据类型和标签筛选可用打印机绑定。
+List<PrinterBinding> resolvePrinterBindings({
+  required Iterable<PrinterBinding> bindings,
+  required PrintJobType type,
+  Iterable<String> tags = const <String>[],
+  String? tenantId,
+  String? storeId,
+}) {
+  return [
+    for (final binding in bindings)
+      if (binding.matches(
+        type: type,
+        tags: tags,
+        tenantId: tenantId,
+        storeId: storeId,
+      ))
+        binding,
+  ];
+}
+
+/// 将同一份业务数据按打印机绑定分发到多台打印机。
+///
+/// 返回值按匹配到的绑定顺序排列。单台打印机失败会变成对应的 [PrintDispatchResult]，
+/// 不会阻止其它打印机继续打印。
+Future<List<PrintDispatchResult>> dispatchPrintJobs({
+  required Iterable<PrinterBinding> bindings,
+  required PrintJobType type,
+  required Map<String, Object?> data,
+  Iterable<String> tags = const <String>[],
+  String? tenantId,
+  String? storeId,
+  ReceiptTemplate? fallbackTemplate,
+  bool queued = true,
+  bool requireTargets = true,
+}) async {
+  final targets = resolvePrinterBindings(
+    bindings: bindings,
+    type: type,
+    tags: tags,
+    tenantId: tenantId,
+    storeId: storeId,
+  );
+  if (targets.isEmpty) {
+    if (requireTargets) {
+      throw StateError('没有匹配的打印机绑定');
+    }
+    return const [];
+  }
+
+  return Future.wait([
+    for (final binding in targets)
+      _dispatchPrintJob(
+        binding: binding,
+        type: type,
+        data: data,
+        fallbackTemplate: fallbackTemplate,
+        queued: queued,
+      ),
+  ]);
+}
+
+Future<PrintDispatchResult> _dispatchPrintJob({
+  required PrinterBinding binding,
+  required PrintJobType type,
+  required Map<String, Object?> data,
+  required ReceiptTemplate? fallbackTemplate,
+  required bool queued,
+}) async {
+  final job = binding.buildJob(
+    type: type,
+    data: data,
+    fallbackTemplate: fallbackTemplate,
+  );
+  try {
+    return PrintDispatchResult(
+      binding: binding,
+      job: job,
+      result: await printJob(job, queued: queued),
+    );
+  } catch (error) {
+    return PrintDispatchResult(
+      binding: binding,
+      job: job,
+      result: PrintResult(ok: false, error: error.toString()),
+    );
+  }
+}
 
 /// 按任务类型只渲染，不连接打印机。
 Future<RenderResult> renderJob(PrintJob job) => renderReceipt(job);

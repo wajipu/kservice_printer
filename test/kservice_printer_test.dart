@@ -313,6 +313,70 @@ void main() {
     expect(activeNetworkDiscoveryCount, 0);
   });
 
+  test('resolves printer bindings by tenant store type and tags', () {
+    final bindings = [
+      PrinterBinding(
+        id: 'cashier',
+        tenantId: 'tenant-a',
+        storeId: 'store-1',
+        connection: const PrinterConnection.network(
+          host: '127.0.0.1',
+          port: 9100,
+          timeoutMs: 1000,
+        ),
+        types: const [PrintJobType.receipt],
+        tags: const ['cashier'],
+      ),
+      PrinterBinding(
+        id: 'bar',
+        tenantId: 'tenant-a',
+        storeId: 'store-1',
+        connection: const PrinterConnection.network(
+          host: '127.0.0.2',
+          port: 9100,
+          timeoutMs: 1000,
+        ),
+        types: const [PrintJobType.kitchen],
+        tags: const ['drink'],
+      ),
+      PrinterBinding(
+        id: 'other-store',
+        tenantId: 'tenant-a',
+        storeId: 'store-2',
+        connection: const PrinterConnection.network(
+          host: '127.0.0.3',
+          port: 9100,
+          timeoutMs: 1000,
+        ),
+        types: const [PrintJobType.kitchen],
+        tags: const ['drink'],
+      ),
+      PrinterBinding(
+        id: 'disabled',
+        tenantId: 'tenant-a',
+        storeId: 'store-1',
+        connection: const PrinterConnection.network(
+          host: '127.0.0.4',
+          port: 9100,
+          timeoutMs: 1000,
+        ),
+        types: const [PrintJobType.kitchen],
+        tags: const ['drink'],
+        enabled: false,
+      ),
+    ];
+
+    final targets = resolvePrinterBindings(
+      bindings: bindings,
+      tenantId: 'tenant-a',
+      storeId: 'store-1',
+      type: PrintJobType.kitchen,
+      tags: const ['drink'],
+    );
+
+    expect(targets.map((binding) => binding.id), ['bar']);
+  });
+
   test('print queue serializes jobs for the same printer', () async {
     final connection = const PrinterConnection.network(
       host: '127.0.0.1',
@@ -374,10 +438,115 @@ void main() {
 
     expect(_fakeRustApi.maxActiveTotal, 2);
   });
+
+  test('dispatches one ticket to multiple printer bindings', () async {
+    final template = const ReceiptTemplate(elements: []);
+    final bindings = [
+      PrinterBinding(
+        id: 'cashier',
+        tenantId: 'tenant-a',
+        storeId: 'store-1',
+        connection: const PrinterConnection.network(
+          host: '127.0.0.1',
+          port: 9100,
+          timeoutMs: 1000,
+        ),
+        types: const [PrintJobType.receipt],
+        tags: const ['customer'],
+        template: template,
+      ),
+      PrinterBinding(
+        id: 'backup',
+        tenantId: 'tenant-a',
+        storeId: 'store-1',
+        connection: const PrinterConnection.network(
+          host: '127.0.0.2',
+          port: 9100,
+          timeoutMs: 1000,
+        ),
+        types: const [PrintJobType.receipt],
+        tags: const ['customer'],
+        template: template,
+      ),
+    ];
+
+    final results = await dispatchPrintJobs(
+      bindings: bindings,
+      tenantId: 'tenant-a',
+      storeId: 'store-1',
+      type: PrintJobType.receipt,
+      tags: const ['customer'],
+      data: {'id': 'order-1'},
+    );
+
+    expect(results.map((result) => result.targetId), ['cashier', 'backup']);
+    expect(results.every((result) => result.ok), isTrue);
+    expect(_fakeRustApi.startedJobIds, ['order-1', 'order-1']);
+    expect(_fakeRustApi.maxActiveTotal, 2);
+  });
+
+  test('dispatch keeps other printer results when one target fails', () async {
+    const goodConnection = PrinterConnection.network(
+      host: '127.0.0.1',
+      port: 9100,
+      timeoutMs: 1000,
+    );
+    const badConnection = PrinterConnection.network(
+      host: '127.0.0.2',
+      port: 9100,
+      timeoutMs: 1000,
+    );
+    final template = const ReceiptTemplate(elements: []);
+    _fakeRustApi.failedQueueKeys.add(badConnection.queueKey);
+
+    final results = await dispatchPrintJobs(
+      bindings: [
+        PrinterBinding(
+          id: 'cashier',
+          connection: goodConnection,
+          types: const [PrintJobType.receipt],
+          template: template,
+        ),
+        PrinterBinding(
+          id: 'backup',
+          connection: badConnection,
+          types: const [PrintJobType.receipt],
+          template: template,
+        ),
+      ],
+      type: PrintJobType.receipt,
+      data: {'id': 'order-2'},
+    );
+
+    expect(results, hasLength(2));
+    expect(results.first.ok, isTrue);
+    expect(results.last.ok, isFalse);
+    expect(results.last.result.error, 'offline');
+  });
+
+  test('dispatch handles missing printer bindings explicitly', () async {
+    final optionalResults = await dispatchPrintJobs(
+      bindings: const [],
+      type: PrintJobType.receipt,
+      data: {'id': 'order-3'},
+      requireTargets: false,
+    );
+
+    expect(optionalResults, isEmpty);
+    await expectLater(
+      dispatchPrintJobs(
+        bindings: const [],
+        type: PrintJobType.receipt,
+        data: {'id': 'order-3'},
+      ),
+      throwsA(isA<StateError>()),
+    );
+  });
 }
 
 class _FakeRustApi extends RustLibApi {
   final startedJobIds = <String>[];
+  final failedQueueKeys = <String>{};
   final maxActiveByKey = <String, int>{};
   final _activeByKey = <String, int>{};
   List<Map<String, Object?>> usbPrinters = const [];
@@ -389,6 +558,7 @@ class _FakeRustApi extends RustLibApi {
 
   void reset() {
     startedJobIds.clear();
+    failedQueueKeys.clear();
     maxActiveByKey.clear();
     _activeByKey.clear();
     usbPrinters = const [];
@@ -451,14 +621,19 @@ class _FakeRustApi extends RustLibApi {
     _activeTotal += 1;
     maxActiveTotal = math.max(maxActiveTotal, _activeTotal);
 
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-
-    _activeByKey[key] = (_activeByKey[key] ?? 1) - 1;
-    _activeTotal -= 1;
-    return jsonEncode({
-      'ok': true,
-      'result': {'printed': true, 'bytes': 1},
-    });
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      if (failedQueueKeys.contains(key)) {
+        return jsonEncode({'ok': false, 'error': 'offline'});
+      }
+      return jsonEncode({
+        'ok': true,
+        'result': {'printed': true, 'bytes': 1},
+      });
+    } finally {
+      _activeByKey[key] = (_activeByKey[key] ?? 1) - 1;
+      _activeTotal -= 1;
+    }
   }
 
   @override
