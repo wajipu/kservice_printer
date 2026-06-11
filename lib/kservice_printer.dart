@@ -295,6 +295,8 @@ class UsbPrinterInfo {
     this.product,
     this.serial,
     this.isPrinter = false,
+    this.hasPermission,
+    this.platformDeviceId,
   });
 
   final int vendorId;
@@ -305,13 +307,19 @@ class UsbPrinterInfo {
   final String? product;
   final String? serial;
   final bool isPrinter;
+  final bool? hasPermission;
+  final String? platformDeviceId;
 
   String get displayName {
     final name = [
       if (manufacturer != null && manufacturer!.isNotEmpty) manufacturer,
       if (product != null && product!.isNotEmpty) product,
     ].join(' ');
-    final label = name.isEmpty ? 'USB Device' : name;
+    final label = name.isEmpty
+        ? (platformDeviceId != null && platformDeviceId!.isNotEmpty
+              ? platformDeviceId!
+              : 'USB Device')
+        : name;
     return '$label · $vendorIdHex/$productIdHex';
   }
 
@@ -328,14 +336,32 @@ class UsbPrinterInfo {
       product: json['product']?.toString(),
       serial: json['serial']?.toString(),
       isPrinter: json['isPrinter'] == true,
+      hasPermission: json['hasPermission'] is bool
+          ? json['hasPermission'] as bool
+          : null,
+      platformDeviceId: json['deviceName']?.toString(),
     );
   }
 }
 
 /// 扫描本机可见 USB 设备，并优先返回 USB printer class 设备。
 Future<List<UsbPrinterInfo>> listUsbPrinters() async {
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final response = await _platformChannel.invokeMethod<String>(
+      'listUsbPrinters',
+    );
+    return _decodeUsbPrinterListResponse(response);
+  }
+
   await initKservicePrinter();
   final response = await rust_printer.listUsbPrinters();
+  return _decodeUsbPrinterListResponse(response);
+}
+
+List<UsbPrinterInfo> _decodeUsbPrinterListResponse(String? response) {
+  if (response == null || response.isEmpty) {
+    throw StateError('USB 扫描未返回结果');
+  }
   final json = jsonDecode(response) as Map<String, dynamic>;
   if (json['ok'] != true) {
     throw StateError(json['error']?.toString() ?? 'USB 扫描失败');
@@ -349,6 +375,29 @@ Future<List<UsbPrinterInfo>> listUsbPrinters() async {
     for (final item in printers)
       if (item is Map<String, dynamic>) UsbPrinterInfo.fromJson(item),
   ];
+}
+
+/// Android 上请求指定 USB 设备授权；其它平台没有对应运行时授权，直接返回 true。
+Future<bool> requestUsbPrinterPermission(UsbPrinterInfo printer) async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return printer.hasPermission ?? true;
+  }
+
+  final response = await _platformChannel
+      .invokeMethod<String>('requestUsbPrinterPermission', {
+        'vendorId': printer.vendorId,
+        'productId': printer.productId,
+        'deviceName': printer.platformDeviceId,
+      });
+  if (response == null || response.isEmpty) {
+    throw StateError('USB 授权未返回结果');
+  }
+  final json = jsonDecode(response) as Map<String, dynamic>;
+  if (json['ok'] != true) {
+    throw StateError(json['error']?.toString() ?? 'USB 授权失败');
+  }
+  final result = json['result'];
+  return result is Map && result['granted'] == true;
 }
 
 /// mDNS/DNS-SD 发现到的网络打印设备。

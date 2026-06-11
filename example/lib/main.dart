@@ -207,7 +207,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
             : '发现 ${printers.length} 个 USB 设备';
         _details = printers.isEmpty
             ? '请确认打印机已连接并上电。'
-            : printers.map((printer) => printer.displayName).join('\n');
+            : printers.map(_usbPrinterDisplayName).join('\n');
       });
     } catch (error, stackTrace) {
       if (!mounted) return;
@@ -225,6 +225,75 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
   void _applyUsbPrinter(UsbPrinterInfo printer) {
     _usbVendorController.text = printer.vendorIdHex;
     _usbProductController.text = printer.productIdHex;
+  }
+
+  String _usbPrinterDisplayName(UsbPrinterInfo printer) {
+    final labels = <String>[
+      printer.displayName,
+      if (printer.isPrinter) 'Printer',
+      if (printer.hasPermission != null) printer.hasPermission! ? '已授权' : '未授权',
+    ];
+    return labels.join(' · ');
+  }
+
+  Future<void> _requestUsbPermission() async {
+    final printer = _selectedUsbPrinter;
+    if (printer == null) {
+      return;
+    }
+
+    setState(() {
+      _busy = true;
+      _status = '正在请求 USB 授权...';
+      _details = _usbPrinterDisplayName(printer);
+    });
+
+    try {
+      final granted = await requestUsbPrinterPermission(printer);
+      final printers = await listUsbPrinters();
+      final selected = _selectUsbPrinter(printers, printer);
+      if (!mounted) return;
+      setState(() {
+        _usbPrinters = printers;
+        _selectedUsbPrinter = selected;
+        if (selected != null) {
+          _applyUsbPrinter(selected);
+        }
+        _status = granted ? 'USB 授权成功' : 'USB 授权被拒绝';
+        _details = printers.isEmpty
+            ? '请确认打印机已连接并上电。'
+            : printers.map(_usbPrinterDisplayName).join('\n');
+      });
+    } catch (error, stackTrace) {
+      if (!mounted) return;
+      setState(() {
+        _status = 'USB 授权失败';
+        _details = '$error\n$stackTrace';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  UsbPrinterInfo? _selectUsbPrinter(
+    List<UsbPrinterInfo> printers,
+    UsbPrinterInfo preferred,
+  ) {
+    for (final printer in printers) {
+      if (preferred.platformDeviceId != null &&
+          printer.platformDeviceId == preferred.platformDeviceId) {
+        return printer;
+      }
+    }
+    for (final printer in printers) {
+      if (printer.vendorId == preferred.vendorId &&
+          printer.productId == preferred.productId) {
+        return printer;
+      }
+    }
+    return printers.isEmpty ? null : printers.first;
   }
 
   Future<void> _scanNetworkPrinters() async {
@@ -490,9 +559,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
                     DropdownMenuItem(
                       value: printer,
                       child: Text(
-                        printer.isPrinter
-                            ? '${printer.displayName} · Printer'
-                            : printer.displayName,
+                        _usbPrinterDisplayName(printer),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -506,6 +573,14 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
                           _applyUsbPrinter(printer);
                         });
                       },
+              ),
+            ],
+            if (_selectedUsbPrinter?.hasPermission == false) ...[
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _busy ? null : _requestUsbPermission,
+                icon: const Icon(Icons.usb),
+                label: const Text('请求 USB 授权'),
               ),
             ],
             const SizedBox(height: 12),

@@ -207,6 +207,25 @@ void main() {
     expect(printer.connection().queueKey, 'network:192.168.1.50:9100');
   });
 
+  test('parses Android USB permission metadata', () {
+    final printer = UsbPrinterInfo.fromJson({
+      'vendorId': 0x0483,
+      'productId': 0x070B,
+      'vendorIdHex': '0x0483',
+      'productIdHex': '0x070B',
+      'manufacturer': null,
+      'product': null,
+      'deviceName': '/dev/bus/usb/001/002',
+      'isPrinter': true,
+      'hasPermission': false,
+    });
+
+    expect(printer.displayName, '/dev/bus/usb/001/002 · 0x0483/0x070B');
+    expect(printer.isPrinter, isTrue);
+    expect(printer.hasPermission, isFalse);
+    expect(printer.platformDeviceId, '/dev/bus/usb/001/002');
+  });
+
   test('network printer discovery calls are serialized', () async {
     await Future.wait([
       discoverNetworkPrinters(

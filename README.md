@@ -33,12 +33,12 @@ Flutter UI → Dart API → flutter_rust_bridge 生成层 → Rust 引擎
 
 | 平台 | Network | USB | Serial | 构建方式 |
 |------|---------|-----|--------|---------|
-| **Android** | ✅ (含原生 mDNS) | ⚠️ (需 USB 授权适配) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
+| **Android** | ✅ (含原生 mDNS) | ⚠️ (原生扫描；打印需 USB 授权适配) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
 | **macOS** | ✅ | ✅ (IOKit) | ✅ | CocoaPods + cargokit |
 | **Linux** | ✅ | ✅ (libusb) | ✅ | CMake + cargokit |
 | **Windows** | ✅ | ✅ (WinUSB) | ✅ | CMake + cargokit |
 
-Android USB 需要应用层通过 `UsbManager` 完成设备发现和运行时授权；当前插件只提供 Rust/libusb 侧的扫描和直连能力，尚未封装 Android 权限请求、`device_filter`、授权回调等平台通道。生产环境建议优先使用网络打印，或在业务 App 中补齐 Android USB 授权层后再启用 USB 打印。
+Android USB 扫描通过原生 `UsbManager` 执行，并会返回设备的 `hasPermission` 状态；插件 Manifest 会合并 `android.hardware.usb.host`。可以调用 `requestUsbPrinterPermission(printer)` 触发 Android 系统 USB 设备授权弹窗。Android USB 打印仍需要单独适配 `UsbManager.openDevice()` 授权后的 file descriptor 写入通道，因为当前 Rust `UsbDriver` 不能直接消费 Android 授权后返回的 file descriptor。生产环境建议优先使用网络打印，或在业务 App 中补齐 Android USB 打印通道后再启用 USB 打印。
 
 ## 使用
 
@@ -86,7 +86,14 @@ final result = await discoverNetworkPrinters(
 );
 ```
 
-Android 插件 Manifest 会合并 `INTERNET`、`ACCESS_NETWORK_STATE`、`ACCESS_WIFI_STATE`、`CHANGE_WIFI_MULTICAST_STATE` 和 `NEARBY_WIFI_DEVICES`。如果业务 App targetSdk 为 33+ 且系统要求 Nearby Wi-Fi 权限，请在调用扫描前完成运行时授权；iOS 当前不考虑支持。
+Android 插件 Manifest 会合并 `INTERNET`、`ACCESS_NETWORK_STATE`、`ACCESS_WIFI_STATE`、`CHANGE_WIFI_MULTICAST_STATE`、`NEARBY_WIFI_DEVICES` 和 `android.hardware.usb.host`。如果业务 App targetSdk 为 33+ 且系统要求 Nearby Wi-Fi 权限，请在调用扫描前完成运行时授权；iOS 当前不考虑支持。
+
+### 平台权限说明
+
+- macOS：如果宿主 App 开启 App Sandbox，需要在 `DebugProfile.entitlements` 和 `Release.entitlements` 中加入 `com.apple.security.device.usb`。示例 App 已配置。
+- Android：`listUsbPrinters()` 走原生 `UsbManager` 扫描，返回的 `UsbPrinterInfo.hasPermission` 表示系统是否已授权该 USB 设备；`requestUsbPrinterPermission(printer)` 可请求该设备授权。USB 打印仍需要业务侧或后续插件版本实现 Android file descriptor 打印通道。
+- Linux：没有 App manifest 权限；普通用户访问 USB 设备通常需要 udev 规则或加入对应设备组，否则 libusb 可能只能用 `sudo` 访问。
+- Windows：没有 Flutter manifest 权限；USB 直连依赖设备绑定 WinUSB/libusb 兼容驱动。如果打印机使用厂商专用驱动或系统打印队列，libusb 扫描/直连可能不可用。
 
 ### 打印示例
 

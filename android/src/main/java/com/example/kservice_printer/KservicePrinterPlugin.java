@@ -1,9 +1,18 @@
 package com.example.kservice_printer;
 
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.hardware.usb.UsbConstants;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbInterface;
+import android.hardware.usb.UsbManager;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
@@ -29,11 +38,14 @@ import org.json.JSONObject;
 
 public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
     private static final String CHANNEL_NAME = "kservice_printer";
+    private static final String USB_PERMISSION_ACTION =
+            "com.example.kservice_printer.USB_PERMISSION";
 
     private Context applicationContext;
     private Handler mainHandler;
     private MethodChannel channel;
     private NetworkDiscoveryRequest activeDiscoveryRequest;
+    private UsbPermissionRequest activeUsbPermissionRequest;
 
     @Override
     public void onAttachedToEngine(FlutterPluginBinding binding) {
@@ -49,6 +61,10 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
             activeDiscoveryRequest.cancel("Android 插件已销毁，网络扫描取消");
             activeDiscoveryRequest = null;
         }
+        if (activeUsbPermissionRequest != null) {
+            activeUsbPermissionRequest.cancel("Android 插件已销毁，USB 授权取消");
+            activeUsbPermissionRequest = null;
+        }
         if (channel != null) {
             channel.setMethodCallHandler(null);
         }
@@ -59,14 +75,26 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
 
     @Override
     public void onMethodCall(MethodCall call, Result result) {
-        if (!"discoverNetworkPrinters".equals(call.method)) {
-            result.notImplemented();
-            return;
-        }
         if (applicationContext == null || mainHandler == null) {
             result.success(errorResponse("Android 插件尚未完成初始化"));
             return;
         }
+
+        if ("listUsbPrinters".equals(call.method)) {
+            result.success(listUsbPrintersResponse(applicationContext));
+            return;
+        }
+
+        if ("requestUsbPrinterPermission".equals(call.method)) {
+            handleUsbPermissionRequest(call, result);
+            return;
+        }
+
+        if (!"discoverNetworkPrinters".equals(call.method)) {
+            result.notImplemented();
+            return;
+        }
+
         if (activeDiscoveryRequest != null) {
             result.success(errorResponse("已有网络打印机扫描正在进行，请等待本次扫描结束"));
             return;
@@ -101,6 +129,51 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
         requestHolder[0].start();
     }
 
+    private void handleUsbPermissionRequest(MethodCall call, Result result) {
+        if (activeUsbPermissionRequest != null) {
+            result.success(errorResponse("已有 USB 授权请求正在进行，请先完成当前授权"));
+            return;
+        }
+
+        UsbManager usbManager = (UsbManager) applicationContext.getSystemService(Context.USB_SERVICE);
+        if (usbManager == null) {
+            result.success(errorResponse("Android 系统未提供 UsbManager，无法请求 USB 授权"));
+            return;
+        }
+
+        UsbDevice device =
+                findUsbDevice(
+                        usbManager,
+                        call.argument("deviceName"),
+                        numberArgument(call, "vendorId"),
+                        numberArgument(call, "productId"));
+        if (device == null) {
+            result.success(errorResponse("没有找到匹配的 USB 设备，请重新扫描后再授权"));
+            return;
+        }
+
+        if (usbManager.hasPermission(device)) {
+            result.success(usbPermissionResponse(device, true));
+            return;
+        }
+
+        final UsbPermissionRequest[] requestHolder = new UsbPermissionRequest[1];
+        requestHolder[0] =
+                new UsbPermissionRequest(
+                        applicationContext,
+                        mainHandler,
+                        usbManager,
+                        device,
+                        result,
+                        () -> {
+                            if (activeUsbPermissionRequest == requestHolder[0]) {
+                                activeUsbPermissionRequest = null;
+                            }
+                        });
+        activeUsbPermissionRequest = requestHolder[0];
+        requestHolder[0].start();
+    }
+
     private static String errorResponse(String message) {
         try {
             JSONObject root = new JSONObject();
@@ -109,6 +182,291 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
             return root.toString();
         } catch (JSONException e) {
             return "{\"ok\":false,\"error\":\"网络打印机扫描失败\"}";
+        }
+    }
+
+    private static String usbPermissionResponse(UsbDevice device, boolean granted) {
+        try {
+            JSONObject result = new JSONObject();
+            result.put("granted", granted);
+            result.put("deviceName", device.getDeviceName());
+            result.put("vendorId", device.getVendorId());
+            result.put("productId", device.getProductId());
+            JSONObject root = new JSONObject();
+            root.put("ok", true);
+            root.put("result", result);
+            return root.toString();
+        } catch (JSONException e) {
+            return errorResponse("USB 授权结果编码失败: " + e.getMessage());
+        }
+    }
+
+    private static Number numberArgument(MethodCall call, String key) {
+        Object value = call.argument(key);
+        return value instanceof Number ? (Number) value : null;
+    }
+
+    private static UsbDevice findUsbDevice(
+            UsbManager usbManager, String deviceName, Number vendorId, Number productId) {
+        Map<String, UsbDevice> devices = usbManager.getDeviceList();
+        if (deviceName != null && !deviceName.isEmpty()) {
+            UsbDevice device = devices.get(deviceName);
+            if (device != null) {
+                return device;
+            }
+        }
+        if (vendorId == null || productId == null) {
+            return null;
+        }
+        int targetVendorId = vendorId.intValue();
+        int targetProductId = productId.intValue();
+        for (UsbDevice device : devices.values()) {
+            if (device.getVendorId() == targetVendorId && device.getProductId() == targetProductId) {
+                return device;
+            }
+        }
+        return null;
+    }
+
+    private static String messageFor(Exception e) {
+        String message = e.getMessage();
+        return message == null || message.isEmpty() ? e.getClass().getSimpleName() : message;
+    }
+
+    private static String listUsbPrintersResponse(Context context) {
+        try {
+            UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+            if (usbManager == null) {
+                return errorResponse("Android 系统未提供 UsbManager，无法扫描 USB 设备");
+            }
+
+            JSONArray printers = new JSONArray();
+            List<JSONObject> devices = new ArrayList<>();
+            for (UsbDevice device : usbManager.getDeviceList().values()) {
+                devices.add(usbDeviceJson(usbManager, device));
+            }
+
+            Collections.sort(
+                    devices,
+                    (left, right) -> {
+                        boolean leftPrinter = left.optBoolean("isPrinter", false);
+                        boolean rightPrinter = right.optBoolean("isPrinter", false);
+                        if (leftPrinter != rightPrinter) {
+                            return leftPrinter ? -1 : 1;
+                        }
+                        String leftName = displaySortName(left);
+                        String rightName = displaySortName(right);
+                        int nameCompare = leftName.compareToIgnoreCase(rightName);
+                        if (nameCompare != 0) {
+                            return nameCompare;
+                        }
+                        return left.optString("deviceName").compareTo(right.optString("deviceName"));
+                    });
+
+            for (JSONObject device : devices) {
+                printers.put(device);
+            }
+
+            JSONObject result = new JSONObject();
+            result.put("printers", printers);
+            JSONObject root = new JSONObject();
+            root.put("ok", true);
+            root.put("result", result);
+            return root.toString();
+        } catch (JSONException e) {
+            return errorResponse("USB 扫描结果编码失败: " + e.getMessage());
+        } catch (RuntimeException e) {
+            return errorResponse("USB 扫描失败: " + messageFor(e));
+        }
+    }
+
+    private static JSONObject usbDeviceJson(UsbManager usbManager, UsbDevice device)
+            throws JSONException {
+        JSONObject json = new JSONObject();
+        JSONArray interfaceClasses = new JSONArray();
+        Set<Integer> classCodes = new HashSet<>();
+        for (int index = 0; index < device.getInterfaceCount(); index += 1) {
+            UsbInterface usbInterface = device.getInterface(index);
+            int classCode = usbInterface.getInterfaceClass();
+            if (classCodes.add(classCode)) {
+                interfaceClasses.put(classCode);
+            }
+        }
+
+        int classCode = device.getDeviceClass();
+        boolean isPrinter =
+                classCode == UsbConstants.USB_CLASS_PRINTER
+                        || classCodes.contains(UsbConstants.USB_CLASS_PRINTER);
+
+        json.put("vendorId", device.getVendorId());
+        json.put("productId", device.getProductId());
+        json.put("vendorIdHex", String.format(Locale.US, "0x%04X", device.getVendorId()));
+        json.put("productIdHex", String.format(Locale.US, "0x%04X", device.getProductId()));
+        putNullable(json, "manufacturer", safeUsbString(() -> device.getManufacturerName()));
+        putNullable(json, "product", safeUsbString(() -> device.getProductName()));
+        putNullable(json, "serial", safeUsbString(() -> device.getSerialNumber()));
+        json.put("classCode", classCode);
+        json.put("interfaceClasses", interfaceClasses);
+        json.put("isPrinter", isPrinter);
+        json.put("hasPermission", usbManager.hasPermission(device));
+        json.put("deviceName", device.getDeviceName());
+        return json;
+    }
+
+    private static String displaySortName(JSONObject json) {
+        String manufacturer = nullableString(json, "manufacturer");
+        String product = nullableString(json, "product");
+        if (!manufacturer.isEmpty() || !product.isEmpty()) {
+            return manufacturer + " " + product;
+        }
+        return json.optString("deviceName");
+    }
+
+    private static String nullableString(JSONObject json, String key) {
+        return json.isNull(key) ? "" : json.optString(key);
+    }
+
+    private static void putNullable(JSONObject json, String key, String value) throws JSONException {
+        if (value == null || value.isEmpty()) {
+            json.put(key, JSONObject.NULL);
+        } else {
+            json.put(key, value);
+        }
+    }
+
+    private static String safeUsbString(UsbStringReader reader) {
+        try {
+            return reader.read();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private interface UsbStringReader {
+        String read();
+    }
+
+    private static final class UsbPermissionRequest {
+        private static final long REQUEST_TIMEOUT_MS = 30000L;
+
+        private final Context context;
+        private final Handler mainHandler;
+        private final UsbManager usbManager;
+        private final UsbDevice device;
+        private final Result result;
+        private final Runnable onFinished;
+        private final String action;
+        private BroadcastReceiver receiver;
+        private Runnable timeoutRunnable;
+        private boolean finished;
+
+        UsbPermissionRequest(
+                Context context,
+                Handler mainHandler,
+                UsbManager usbManager,
+                UsbDevice device,
+                Result result,
+                Runnable onFinished) {
+            this.context = context.getApplicationContext();
+            this.mainHandler = mainHandler;
+            this.usbManager = usbManager;
+            this.device = device;
+            this.result = result;
+            this.onFinished = onFinished;
+            this.action = USB_PERMISSION_ACTION + "." + System.identityHashCode(this);
+        }
+
+        void start() {
+            runOnMain(
+                    () -> {
+                        try {
+                            startOnMain();
+                        } catch (RuntimeException e) {
+                            finishError("USB 授权请求失败: " + messageFor(e));
+                        }
+                    });
+        }
+
+        void cancel(String message) {
+            runOnMain(() -> finishError(message));
+        }
+
+        private void startOnMain() {
+            receiver =
+                    new BroadcastReceiver() {
+                        @Override
+                        public void onReceive(Context context, Intent intent) {
+                            if (!action.equals(intent.getAction())) {
+                                return;
+                            }
+                            boolean granted =
+                                    intent.getBooleanExtra(
+                                            UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                            finishSuccess(granted);
+                        }
+                    };
+            IntentFilter filter = new IntentFilter(action);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                context.registerReceiver(receiver, filter);
+            }
+
+            timeoutRunnable = () -> finishError("USB 授权请求超时");
+            mainHandler.postDelayed(timeoutRunnable, REQUEST_TIMEOUT_MS);
+
+            Intent intent = new Intent(action).setPackage(context.getPackageName());
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent permissionIntent =
+                    PendingIntent.getBroadcast(
+                            context, System.identityHashCode(this), intent, flags);
+            usbManager.requestPermission(device, permissionIntent);
+        }
+
+        private void finishSuccess(boolean granted) {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            cleanup();
+            onFinished.run();
+            result.success(usbPermissionResponse(device, granted));
+        }
+
+        private void finishError(String message) {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            cleanup();
+            onFinished.run();
+            result.success(errorResponse(message));
+        }
+
+        private void cleanup() {
+            if (timeoutRunnable != null) {
+                mainHandler.removeCallbacks(timeoutRunnable);
+                timeoutRunnable = null;
+            }
+            if (receiver != null) {
+                try {
+                    context.unregisterReceiver(receiver);
+                } catch (RuntimeException ignored) {
+                    // Receiver may already be unregistered during plugin teardown.
+                }
+                receiver = null;
+            }
+        }
+
+        private void runOnMain(Runnable runnable) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                runnable.run();
+            } else {
+                mainHandler.post(runnable);
+            }
         }
     }
 
