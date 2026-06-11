@@ -155,6 +155,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install macOS deps
+        run: |
+          brew install libusb pkg-config
+          brew link libusb || true
+          echo "PKG_CONFIG_PATH=$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
