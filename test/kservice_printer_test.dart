@@ -226,6 +226,40 @@ void main() {
     expect(printer.platformDeviceId, '/dev/bus/usb/001/002');
   });
 
+  test('USB scan filters non-printer devices by default', () async {
+    _fakeRustApi.usbPrinters = [
+      {
+        'vendorId': 0x0483,
+        'productId': 0x070B,
+        'vendorIdHex': '0x0483',
+        'productIdHex': '0x070B',
+        'manufacturer': 'Xprinter',
+        'product': 'USB Printer Port',
+        'isPrinter': true,
+      },
+      {
+        'vendorId': 0x05AC,
+        'productId': 0x8009,
+        'vendorIdHex': '0x05AC',
+        'productIdHex': '0x8009',
+        'manufacturer': 'Apple',
+        'product': 'USB2 Hub',
+        'isPrinter': false,
+      },
+    ];
+
+    final printers = await listUsbPrinters();
+    final allDevices = await listUsbPrinters(includeNonPrinters: true);
+
+    expect(printers, hasLength(1));
+    expect(
+      printers.single.displayName,
+      'Xprinter USB Printer Port · 0x0483/0x070B',
+    );
+    expect(allDevices, hasLength(2));
+    expect(allDevices.last.isPrinter, isFalse);
+  });
+
   test('network printer discovery calls are serialized', () async {
     await Future.wait([
       discoverNetworkPrinters(
@@ -310,6 +344,7 @@ class _FakeRustApi extends RustLibApi {
   final startedJobIds = <String>[];
   final maxActiveByKey = <String, int>{};
   final _activeByKey = <String, int>{};
+  List<Map<String, Object?>> usbPrinters = const [];
   int _activeTotal = 0;
   int maxActiveTotal = 0;
   int _activeDiscoveries = 0;
@@ -320,6 +355,7 @@ class _FakeRustApi extends RustLibApi {
     startedJobIds.clear();
     maxActiveByKey.clear();
     _activeByKey.clear();
+    usbPrinters = const [];
     _activeTotal = 0;
     maxActiveTotal = 0;
     _activeDiscoveries = 0;
@@ -358,7 +394,7 @@ class _FakeRustApi extends RustLibApi {
   Future<String> crateApiPrinterListUsbPrinters() async {
     return jsonEncode({
       'ok': true,
-      'result': {'printers': []},
+      'result': {'printers': usbPrinters},
     });
   }
 

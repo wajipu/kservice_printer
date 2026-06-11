@@ -344,21 +344,36 @@ class UsbPrinterInfo {
   }
 }
 
-/// 扫描本机可见 USB 设备，并优先返回 USB printer class 设备。
-Future<List<UsbPrinterInfo>> listUsbPrinters() async {
+/// 扫描本机可见 USB 打印机。
+///
+/// 默认只返回底层识别为 USB printer class 的设备，避免把 Hub、手机、
+/// 声卡、鼠标键盘接收器等普通 USB 设备展示成打印机。排查硬件识别问题时，
+/// 可以设置 [includeNonPrinters] 返回完整 USB 设备清单。
+Future<List<UsbPrinterInfo>> listUsbPrinters({
+  bool includeNonPrinters = false,
+}) async {
   if (defaultTargetPlatform == TargetPlatform.android) {
     final response = await _platformChannel.invokeMethod<String>(
       'listUsbPrinters',
     );
-    return _decodeUsbPrinterListResponse(response);
+    return _decodeUsbPrinterListResponse(
+      response,
+      includeNonPrinters: includeNonPrinters,
+    );
   }
 
   await initKservicePrinter();
   final response = await rust_printer.listUsbPrinters();
-  return _decodeUsbPrinterListResponse(response);
+  return _decodeUsbPrinterListResponse(
+    response,
+    includeNonPrinters: includeNonPrinters,
+  );
 }
 
-List<UsbPrinterInfo> _decodeUsbPrinterListResponse(String? response) {
+List<UsbPrinterInfo> _decodeUsbPrinterListResponse(
+  String? response, {
+  required bool includeNonPrinters,
+}) {
   if (response == null || response.isEmpty) {
     throw StateError('USB 扫描未返回结果');
   }
@@ -373,7 +388,9 @@ List<UsbPrinterInfo> _decodeUsbPrinterListResponse(String? response) {
   }
   return [
     for (final item in printers)
-      if (item is Map<String, dynamic>) UsbPrinterInfo.fromJson(item),
+      if (item is Map<String, dynamic>)
+        if (includeNonPrinters || item['isPrinter'] == true)
+          UsbPrinterInfo.fromJson(item),
   ];
 }
 

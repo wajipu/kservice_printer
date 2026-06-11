@@ -178,35 +178,25 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
   Future<void> _scanUsbPrinters() async {
     setState(() {
       _scanningUsb = true;
-      _status = '正在扫描 USB 设备...';
-      _details = '会优先显示 USB printer class 设备，也会列出当前可见 USB 设备。';
+      _status = '正在扫描 USB 打印机...';
+      _details = '只显示系统识别为 USB printer class 的设备。';
     });
 
     try {
       final printers = await listUsbPrinters();
-      final selected = printers.firstWhere(
-        (printer) => printer.isPrinter,
-        orElse: () => printers.isEmpty
-            ? const UsbPrinterInfo(
-                vendorId: 0,
-                productId: 0,
-                vendorIdHex: '0x0000',
-                productIdHex: '0x0000',
-              )
-            : printers.first,
-      );
+      final selected = printers.isEmpty ? null : printers.first;
       if (!mounted) return;
       setState(() {
         _usbPrinters = printers;
-        _selectedUsbPrinter = printers.isEmpty ? null : selected;
-        if (printers.isNotEmpty) {
+        _selectedUsbPrinter = selected;
+        if (selected != null) {
           _applyUsbPrinter(selected);
         }
         _status = printers.isEmpty
-            ? '没有发现 USB 设备'
-            : '发现 ${printers.length} 个 USB 设备';
+            ? '没有发现 USB 打印机'
+            : '发现 ${printers.length} 台 USB 打印机';
         _details = printers.isEmpty
-            ? '请确认打印机已连接并上电。'
+            ? '请确认打印机已连接并上电。如果设备是厂商私有 USB class，可用 listUsbPrinters(includeNonPrinters: true) 排查。'
             : printers.map(_usbPrinterDisplayName).join('\n');
       });
     } catch (error, stackTrace) {
@@ -551,7 +541,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
               DropdownButtonFormField<UsbPrinterInfo>(
                 initialValue: _selectedUsbPrinter,
                 decoration: const InputDecoration(
-                  labelText: 'USB 设备',
+                  labelText: 'USB 打印机',
                   prefixIcon: Icon(Icons.print),
                 ),
                 items: [
