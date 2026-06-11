@@ -57,10 +57,13 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
 
   bool _busy = false;
   bool _scanningUsb = false;
+  bool _scanningNetwork = false;
   String _status = '等待操作';
   String _details = '请选择连接方式和模板，然后渲染或打印测试订单。';
   List<UsbPrinterInfo> _usbPrinters = const [];
   UsbPrinterInfo? _selectedUsbPrinter;
+  List<NetworkPrinterInfo> _networkPrinters = const [];
+  NetworkPrinterInfo? _selectedNetworkPrinter;
 
   @override
   void dispose() {
@@ -222,6 +225,72 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
   void _applyUsbPrinter(UsbPrinterInfo printer) {
     _usbVendorController.text = printer.vendorIdHex;
     _usbProductController.text = printer.productIdHex;
+  }
+
+  Future<void> _scanNetworkPrinters() async {
+    final timeoutMs = _parseInt(_networkTimeoutController.text, fallback: 3000);
+    setState(() {
+      _scanningNetwork = true;
+      _status = '正在扫描网络打印机...';
+      _details = '通过 mDNS/DNS-SD 扫描 WiFi/局域网打印服务，超时 ${timeoutMs}ms。';
+    });
+
+    try {
+      final result = await discoverNetworkPrinters(
+        timeout: Duration(milliseconds: timeoutMs),
+      );
+      final printers = result.printers;
+      NetworkPrinterInfo? rawTcpPrinter;
+      for (final printer in printers) {
+        if (printer.supportsRawTcp) {
+          rawTcpPrinter = printer;
+          break;
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _networkPrinters = printers;
+        _selectedNetworkPrinter =
+            rawTcpPrinter ?? (printers.isEmpty ? null : printers.first);
+        if (rawTcpPrinter != null) {
+          _applyNetworkPrinter(rawTcpPrinter);
+        }
+        _status = printers.isEmpty
+            ? '没有发现网络打印服务'
+            : '发现 ${printers.length} 个网络打印服务';
+        _details = printers.isEmpty
+            ? '请确认设备和本机在同一 WiFi/局域网，且路由器未禁用 mDNS。'
+            : [
+                '耗时：${result.durationMs}ms',
+                if (rawTcpPrinter == null)
+                  '未发现可直接 ESC/POS raw TCP 连接的 9100/_pdl-datastream 服务',
+                ...printers.map(
+                  (printer) =>
+                      '${printer.displayName} · ${printer.serviceType}'
+                      '${printer.supportsRawTcp ? ' · Raw TCP' : ''}',
+                ),
+              ].join('\n');
+      });
+    } catch (error, stackTrace) {
+      if (!mounted) return;
+      setState(() {
+        _status = '网络扫描失败';
+        _details = '$error\n$stackTrace';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _scanningNetwork = false);
+      }
+    }
+  }
+
+  void _applyNetworkPrinter(NetworkPrinterInfo printer) {
+    if (printer.host.isNotEmpty) {
+      _networkHostController.text = printer.host;
+    }
+    if (printer.port > 0) {
+      _networkPortController.text = printer.port.toString();
+    }
   }
 
   Future<void> _runAction({
@@ -461,6 +530,57 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
             ),
           ],
           _ConnectionMode.network => [
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: _busy || _scanningNetwork
+                        ? null
+                        : _scanNetworkPrinters,
+                    icon: _scanningNetwork
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.travel_explore),
+                    label: const Text('扫描网络打印机'),
+                  ),
+                ),
+              ],
+            ),
+            if (_networkPrinters.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              DropdownButtonFormField<NetworkPrinterInfo>(
+                initialValue: _selectedNetworkPrinter,
+                decoration: const InputDecoration(
+                  labelText: '网络打印服务',
+                  prefixIcon: Icon(Icons.wifi_tethering),
+                ),
+                items: [
+                  for (final printer in _networkPrinters)
+                    DropdownMenuItem(
+                      value: printer,
+                      child: Text(
+                        printer.supportsRawTcp
+                            ? '${printer.displayName} · Raw TCP'
+                            : printer.displayName,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: _busy
+                    ? null
+                    : (printer) {
+                        if (printer == null) return;
+                        setState(() {
+                          _selectedNetworkPrinter = printer;
+                          _applyNetworkPrinter(printer);
+                        });
+                      },
+              ),
+            ],
+            const SizedBox(height: 12),
             _TextField(
               controller: _networkHostController,
               label: 'IP / Host',

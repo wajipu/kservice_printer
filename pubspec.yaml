@@ -1,5 +1,5 @@
 name: kservice_printer
-description: "A new Flutter FFI plugin project."
+description: "Flutter + Rust ESC/POS printer plugin for POS receipts, kitchen tickets, and labels."
 version: 0.0.1
 homepage:
 
@@ -10,7 +10,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_rust_bridge: 2.12.0
+  flutter_rust_bridge: ^2.12.0
   freezed_annotation: ^3.1.0
 
 dev_dependencies:
@@ -40,6 +40,8 @@ flutter:
   plugin:
     platforms:
       android:
+        package: com.example.kservice_printer
+        pluginClass: KservicePrinterPlugin
         ffiPlugin: true
       linux:
         ffiPlugin: true

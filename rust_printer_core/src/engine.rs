@@ -5,15 +5,18 @@ use escpos::driver::{Driver, SerialPortDriver, UsbDriver};
 use escpos::errors::PrinterError as EscposError;
 use escpos::printer::Printer;
 use escpos::utils::*;
-use handlebars::Handlebars;
+use handlebars::{no_escape, Handlebars};
 use image::{GrayImage, Luma};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use mdns_sd::{ServiceDaemon, ServiceEvent};
 use rusb::UsbContext;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -147,6 +150,8 @@ pub enum PrinterError {
     InvalidImageData(String),
     #[error("原始 hex 指令解析失败: {0}")]
     InvalidRawHex(String),
+    #[error("网络发现失败: {0}")]
+    Discovery(String),
     #[error("ESC/POS 驱动错误: {0}")]
     Escpos(String),
     #[error("连接打印机失败: {0}")]
@@ -254,6 +259,8 @@ struct Column {
     width: usize,
     #[serde(default)]
     align: Align,
+    #[serde(default)]
+    bold: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -308,6 +315,17 @@ fn default_image_max_width() -> u32 {
     192
 }
 
+const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 3_000;
+const MIN_DISCOVERY_TIMEOUT_MS: u64 = 250;
+const MAX_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
+const MDNS_RECV_SLICE_MS: u64 = 50;
+const DEFAULT_NETWORK_PRINTER_SERVICE_TYPES: &[&str] = &[
+    "_pdl-datastream._tcp.local.",
+    "_printer._tcp.local.",
+    "_ipp._tcp.local.",
+    "_ipps._tcp.local.",
+];
+
 // ---- 公开入口 ----
 
 pub fn print_receipt(
@@ -326,6 +344,10 @@ pub fn list_usb_printers() -> String {
     into_response(list_usb_printers_inner())
 }
 
+pub fn discover_network_printers(timeout_ms: u64, service_types: Vec<String>) -> String {
+    into_response(discover_network_printers_inner(timeout_ms, service_types))
+}
+
 // ---- 内部 ----
 
 fn print_receipt_inner(
@@ -338,7 +360,7 @@ fn print_receipt_inner(
         serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
     let (driver, bytes) = CountingDriver::new(open_driver(connection)?);
     let mut printer = build_printer(driver, &template, &data)?;
-    printer.print_cut()?;
+    printer.print()?;
     let bytes = *bytes.lock().unwrap();
     Ok(json!({ "printed": true, "bytes": bytes }))
 }
@@ -349,7 +371,7 @@ fn render_receipt_inner(template_json: &str, data_json: &str) -> Result<Value, P
         serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
     let (driver, buf) = VecDriver::new();
     let mut printer = build_printer(driver, &template, &data)?;
-    printer.print_cut()?;
+    printer.print()?;
     let bytes = buf.lock().unwrap().clone();
     Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }))
 }
@@ -420,7 +442,7 @@ fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError
             timeout_ms,
         } => {
             let driver =
-                TcpDriver::open(host, *port, *timeout_ms).map_err(|e| PrinterError::Connect(e))?;
+                TcpDriver::open(host, *port, *timeout_ms).map_err(PrinterError::Connect)?;
             Ok(AnyDriver::Tcp(driver))
         }
         PrinterConnection::Usb {
@@ -514,6 +536,240 @@ fn usb_interface_classes<T: UsbContext>(device: &rusb::Device<T>) -> Vec<u8> {
     classes
 }
 
+#[derive(Debug, Clone)]
+struct NetworkPrinterCandidate {
+    service_name: String,
+    service_type: String,
+    fullname: String,
+    hostname: String,
+    host: String,
+    port: u16,
+    addresses: Vec<String>,
+    txt: HashMap<String, String>,
+    supports_raw_tcp: bool,
+}
+
+impl NetworkPrinterCandidate {
+    fn to_json(&self) -> Value {
+        json!({
+            "serviceName": self.service_name,
+            "serviceType": self.service_type,
+            "fullname": self.fullname,
+            "hostname": self.hostname,
+            "host": self.host,
+            "port": self.port,
+            "addresses": self.addresses,
+            "txt": self.txt,
+            "supportsRawTcp": self.supports_raw_tcp,
+        })
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn discover_network_printers_inner(
+    _timeout_ms: u64,
+    _service_types: Vec<String>,
+) -> Result<Value, PrinterError> {
+    Err(PrinterError::Discovery(
+        "当前平台需要通过原生网络服务发现 API 和运行时权限适配 mDNS".into(),
+    ))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn discover_network_printers_inner(
+    timeout_ms: u64,
+    service_types: Vec<String>,
+) -> Result<Value, PrinterError> {
+    let timeout_ms = normalize_discovery_timeout_ms(timeout_ms);
+    let service_types = normalize_discovery_service_types(service_types)?;
+    let started_at = Instant::now();
+    let deadline = started_at + Duration::from_millis(timeout_ms);
+    let mdns = ServiceDaemon::new().map_err(|e| PrinterError::Discovery(e.to_string()))?;
+    let mut receivers = Vec::new();
+
+    for service_type in &service_types {
+        let receiver = mdns
+            .browse(service_type)
+            .map_err(|e| PrinterError::Discovery(e.to_string()))?;
+        receivers.push((service_type.clone(), receiver));
+    }
+
+    let mut candidates = HashMap::<String, NetworkPrinterCandidate>::new();
+
+    'scan: while Instant::now() < deadline {
+        for (service_type, receiver) in &receivers {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break 'scan;
+            }
+            let wait = remaining.min(Duration::from_millis(MDNS_RECV_SLICE_MS));
+            match receiver.recv_timeout(wait) {
+                Ok(ServiceEvent::ServiceResolved(info)) => {
+                    if let Some(candidate) = network_candidate_from_mdns(service_type, &info) {
+                        let key = network_candidate_key(&candidate);
+                        candidates.insert(key, candidate);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+    }
+
+    for service_type in &service_types {
+        let _ = mdns.stop_browse(service_type);
+    }
+    if let Ok(status) = mdns.shutdown() {
+        let _ = status.recv_timeout(Duration::from_millis(200));
+    }
+
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    let mut printers = candidates.into_values().collect::<Vec<_>>();
+    printers.sort_by(|a, b| {
+        a.service_name
+            .to_lowercase()
+            .cmp(&b.service_name.to_lowercase())
+            .then_with(|| a.host.cmp(&b.host))
+            .then_with(|| a.port.cmp(&b.port))
+    });
+
+    Ok(json!({
+        "timeoutMs": timeout_ms,
+        "durationMs": elapsed_ms,
+        "timedOut": elapsed_ms >= timeout_ms,
+        "serviceTypes": service_types,
+        "printers": printers.into_iter().map(|printer| printer.to_json()).collect::<Vec<_>>(),
+    }))
+}
+
+fn normalize_discovery_timeout_ms(timeout_ms: u64) -> u64 {
+    let timeout_ms = if timeout_ms == 0 {
+        DEFAULT_DISCOVERY_TIMEOUT_MS
+    } else {
+        timeout_ms
+    };
+    timeout_ms.clamp(MIN_DISCOVERY_TIMEOUT_MS, MAX_DISCOVERY_TIMEOUT_MS)
+}
+
+fn normalize_discovery_service_types(
+    service_types: Vec<String>,
+) -> Result<Vec<String>, PrinterError> {
+    let source = if service_types.is_empty() {
+        DEFAULT_NETWORK_PRINTER_SERVICE_TYPES
+            .iter()
+            .map(|value| value.to_string())
+            .collect()
+    } else {
+        service_types
+    };
+    let mut normalized = Vec::new();
+    for service_type in source {
+        let service_type = normalize_mdns_service_type(&service_type)?;
+        if !normalized.contains(&service_type) {
+            normalized.push(service_type);
+        }
+    }
+    Ok(normalized)
+}
+
+fn normalize_mdns_service_type(service_type: &str) -> Result<String, PrinterError> {
+    let mut value = service_type
+        .trim()
+        .to_ascii_lowercase()
+        .trim_end_matches('.')
+        .to_string();
+    if value.is_empty() {
+        return Err(PrinterError::Discovery("mDNS 服务类型不能为空".into()));
+    }
+    if value.ends_with(".local") {
+        value.truncate(value.len() - ".local".len());
+    }
+    if !value.starts_with('_') {
+        value.insert(0, '_');
+    }
+    if !value.contains("._tcp") && !value.contains("._udp") {
+        if value.contains('.') {
+            return Err(PrinterError::Discovery(format!(
+                "mDNS 服务类型缺少 _tcp 或 _udp 协议段: {service_type}"
+            )));
+        }
+        value.push_str("._tcp");
+    }
+    value.push_str(".local.");
+    if !(value.ends_with("._tcp.local.") || value.ends_with("._udp.local.")) {
+        return Err(PrinterError::Discovery(format!(
+            "mDNS 服务类型必须以 ._tcp.local. 或 ._udp.local. 结尾: {service_type}"
+        )));
+    }
+    Ok(value)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn network_candidate_from_mdns(
+    fallback_service_type: &str,
+    info: &mdns_sd::ResolvedService,
+) -> Option<NetworkPrinterCandidate> {
+    let mut addresses = info
+        .get_addresses()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    addresses.sort();
+    let host = info
+        .get_addresses_v4()
+        .into_iter()
+        .map(|addr| addr.to_string())
+        .min()
+        .or_else(|| addresses.first().cloned())
+        .unwrap_or_else(|| info.get_hostname().trim_end_matches('.').to_string());
+    if host.is_empty() {
+        return None;
+    }
+    let service_type = if info.ty_domain.is_empty() {
+        fallback_service_type.to_string()
+    } else {
+        info.ty_domain.clone()
+    };
+    let txt = info
+        .get_properties()
+        .iter()
+        .map(|property| (property.key().to_string(), property.val_str().to_string()))
+        .collect::<HashMap<_, _>>();
+    Some(NetworkPrinterCandidate {
+        service_name: mdns_instance_name(info.get_fullname(), &service_type),
+        service_type: service_type.clone(),
+        fullname: info.get_fullname().to_string(),
+        hostname: info.get_hostname().trim_end_matches('.').to_string(),
+        host,
+        port: info.get_port(),
+        addresses,
+        txt,
+        supports_raw_tcp: supports_raw_tcp_service(&service_type, info.get_port()),
+    })
+}
+
+fn network_candidate_key(candidate: &NetworkPrinterCandidate) -> String {
+    if candidate.host.is_empty() {
+        format!("{}:{}", candidate.fullname, candidate.port)
+    } else {
+        format!("{}:{}", candidate.host, candidate.port)
+    }
+}
+
+fn mdns_instance_name(fullname: &str, service_type: &str) -> String {
+    fullname
+        .strip_suffix(service_type)
+        .unwrap_or(fullname)
+        .trim_end_matches('.')
+        .replace("\\.", ".")
+        .replace("\\\\", "\\")
+}
+
+fn supports_raw_tcp_service(service_type: &str, port: u16) -> bool {
+    let service_type = service_type.to_ascii_lowercase();
+    service_type.contains("_pdl-datastream._tcp") || port == 9100
+}
+
 // ---- TcpDriver ----
 
 struct TcpDriver {
@@ -573,7 +829,8 @@ fn build_printer<D: Driver>(
     template: &Template,
     data: &Value,
 ) -> Result<Printer<D>, PrinterError> {
-    let handlebars = Handlebars::new();
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(no_escape);
     let mut printer = Printer::new(driver, Protocol::default(), None);
     printer.init()?;
     printer.custom(&[0x1c, 0x26])?;
@@ -582,9 +839,19 @@ fn build_printer<D: Driver>(
         || template.encoding.eq_ignore_ascii_case("bitmap")
     {
         render_template_as_image(&mut printer, template, data, &handlebars)?;
+        if has_cut_element(&template.elements) {
+            printer.cut()?;
+        }
     } else {
         for element in &template.elements {
-            render_element(&mut printer, element, data, &handlebars, template.width)?;
+            render_element(
+                &mut printer,
+                element,
+                data,
+                &handlebars,
+                template.width,
+                &template.encoding,
+            )?;
         }
     }
 
@@ -642,6 +909,7 @@ fn render_element<D: Driver>(
     data: &Value,
     handlebars: &Handlebars,
     line_width: usize,
+    encoding: &str,
 ) -> Result<(), PrinterError> {
     match element {
         Element::Text {
@@ -656,43 +924,49 @@ fn render_element<D: Driver>(
                 printer.size(2, 2)?;
             }
             printer.justify(justify_mode(*align))?;
-            print_text_line(printer, &text)?;
+            print_text_line(printer, &text, encoding)?;
             if matches!(size, TextSize::Double) {
                 printer.size(1, 1)?;
             }
+            printer.bold(false)?;
         }
         Element::Row { left, right, bold } => {
             let l = render_value(handlebars, left, data)?;
             let r = render_value(handlebars, right, data)?;
             printer.bold(*bold)?;
             for line in format_row(&l, &r, line_width) {
-                print_text_line(printer, &line)?;
+                print_text_line(printer, &line, encoding)?;
             }
             printer.bold(false)?;
         }
         Element::Columns { columns } => {
             let mut items = Vec::new();
+            let bold = columns.iter().any(|col| col.bold);
             for col in columns {
                 let value = render_value(handlebars, &col.value, data)?;
                 items.push(fit_text(&value, col.width, col.align));
             }
-            print_text_line(printer, &items.join(""))?;
+            printer.bold(bold)?;
+            print_text_line(printer, &items.join(""), encoding)?;
+            printer.bold(false)?;
         }
         Element::Divider { ch } => {
             let token = ch.chars().next().unwrap_or('-');
-            print_text_line(printer, &repeat_to_width(token, line_width))?;
+            print_text_line(printer, &repeat_to_width(token, line_width), encoding)?;
         }
         Element::Feed { lines } => {
             for _ in 0..*lines {
                 printer.feed()?;
             }
         }
-        Element::Cut => {}
+        Element::Cut => {
+            printer.cut()?;
+        }
         Element::Repeat { path, elements } => {
             if let Some(Value::Array(items)) = value_ref(data, path) {
                 for item in items {
                     for child in elements {
-                        render_element(printer, child, item, handlebars, line_width)?;
+                        render_element(printer, child, item, handlebars, line_width, encoding)?;
                     }
                 }
             }
@@ -769,8 +1043,12 @@ fn print_barcode<D: Driver>(
     Ok(())
 }
 
-fn print_text_line<D: Driver>(printer: &mut Printer<D>, text: &str) -> Result<(), PrinterError> {
-    let encoded = encode_printer_text(text)?;
+fn print_text_line<D: Driver>(
+    printer: &mut Printer<D>,
+    text: &str,
+    encoding: &str,
+) -> Result<(), PrinterError> {
+    let encoded = encode_printer_text(text, encoding)?;
     printer.custom(&encoded)?;
     printer.feed()?;
     Ok(())
@@ -960,7 +1238,7 @@ fn image_bit_option_for_dimensions(
     let scaled_height = if width == 0 {
         height
     } else {
-        ((height as u64 * target_width as u64 + width as u64 - 1) / width as u64) as u32
+        (height as u64 * target_width as u64).div_ceil(width as u64) as u32
     };
     let target_height = max_height.unwrap_or(scaled_height).max(8);
     BitImageOption::new(
@@ -1001,13 +1279,32 @@ fn unique_temp_suffix() -> u128 {
         .unwrap_or(0)
 }
 
-fn encode_printer_text(text: &str) -> Result<Vec<u8>, PrinterError> {
-    let normalized = text.replace('¥', "￥");
-    let (encoded, _, had_errors) = GBK.encode(&normalized);
-    if had_errors {
-        return Err(PrinterError::Encode("GBK 不支持部分字符".into()));
+fn encode_printer_text(text: &str, encoding: &str) -> Result<Vec<u8>, PrinterError> {
+    let normalized_encoding = encoding.trim().to_ascii_lowercase().replace('-', "");
+    if normalized_encoding == "utf8" {
+        return Ok(text.as_bytes().to_vec());
     }
-    Ok(encoded.into_owned())
+
+    if matches!(normalized_encoding.as_str(), "gbk" | "gb2312" | "cp936") {
+        let normalized = text.replace('¥', "￥");
+        let (encoded, _, had_errors) = GBK.encode(&normalized);
+        if had_errors {
+            return Err(PrinterError::Encode("GBK 不支持部分字符".into()));
+        }
+        return Ok(encoded.into_owned());
+    }
+
+    Err(PrinterError::Encode(format!(
+        "不支持的文本编码: {encoding}"
+    )))
+}
+
+fn has_cut_element(elements: &[Element]) -> bool {
+    elements.iter().any(|element| match element {
+        Element::Cut => true,
+        Element::Repeat { elements, .. } => has_cut_element(elements),
+        _ => false,
+    })
 }
 
 fn format_row(left: &str, right: &str, line_width: usize) -> Vec<String> {
@@ -1258,7 +1555,7 @@ mod tests {
 
     #[test]
     fn encodes_cjk_text_as_gbk_for_escpos_printers() {
-        let bytes = encode_printer_text("牛肉饭 ¥58.00").unwrap();
+        let bytes = encode_printer_text("牛肉饭 ¥58.00", "gbk").unwrap();
 
         assert_eq!(
             bytes,
@@ -1266,6 +1563,141 @@ mod tests {
                 0xc5, 0xa3, 0xc8, 0xe2, 0xb7, 0xb9, b' ', 0xa3, 0xa4, b'5', b'8', b'.', b'0', b'0'
             ]
         );
+    }
+
+    #[test]
+    fn encodes_utf8_text_when_requested() {
+        let bytes = encode_printer_text("牛肉饭", "utf-8").unwrap();
+
+        assert_eq!(bytes, "牛肉饭".as_bytes());
+    }
+
+    #[test]
+    fn rejects_unsupported_text_encoding() {
+        let result = encode_printer_text("hello", "shift_jis");
+
+        assert!(matches!(result, Err(PrinterError::Encode(_))));
+    }
+
+    #[test]
+    fn normalizes_mdns_service_types() {
+        assert_eq!(
+            normalize_mdns_service_type("ipp").unwrap(),
+            "_ipp._tcp.local."
+        );
+        assert_eq!(
+            normalize_mdns_service_type("_pdl-datastream._tcp").unwrap(),
+            "_pdl-datastream._tcp.local."
+        );
+        assert_eq!(
+            normalize_mdns_service_type("_printer._tcp.local").unwrap(),
+            "_printer._tcp.local."
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_mdns_service_types() {
+        let result = normalize_mdns_service_type("_bad._http.local.");
+
+        assert!(matches!(result, Err(PrinterError::Discovery(_))));
+    }
+
+    #[test]
+    fn detects_raw_tcp_printer_services_conservatively() {
+        assert!(supports_raw_tcp_service(
+            "_pdl-datastream._tcp.local.",
+            9100
+        ));
+        assert!(supports_raw_tcp_service("_printer._tcp.local.", 9100));
+        assert!(!supports_raw_tcp_service("_printer._tcp.local.", 515));
+        assert!(!supports_raw_tcp_service("_ipp._tcp.local.", 631));
+    }
+
+    #[test]
+    fn cut_element_controls_cut_command() {
+        let without_cut = json!({
+            "width": 32,
+            "elements": [
+                {"type": "text", "value": "No cut"}
+            ]
+        })
+        .to_string();
+        let with_cut = json!({
+            "width": 32,
+            "elements": [
+                {"type": "text", "value": "With cut"},
+                {"type": "cut"}
+            ]
+        })
+        .to_string();
+        let data = json!({}).to_string();
+
+        let without_cut = render_bytes(&without_cut, &data);
+        let with_cut = render_bytes(&with_cut, &data);
+
+        assert!(!contains_subsequence(&without_cut, &[0x1d, b'V', b'A', 0]));
+        assert!(contains_subsequence(&with_cut, &[0x1d, b'V', b'A', 0]));
+    }
+
+    #[test]
+    fn text_element_resets_bold_and_size_state() {
+        let template = json!({
+            "width": 32,
+            "elements": [
+                {"type": "text", "value": "Title", "bold": true, "size": "double"},
+                {"type": "text", "value": "Body"}
+            ]
+        })
+        .to_string();
+        let data = json!({}).to_string();
+
+        let bytes = render_bytes(&template, &data);
+
+        assert!(contains_subsequence(&bytes, &[0x1b, b'E', 1]));
+        assert!(contains_subsequence(&bytes, &[0x1b, b'E', 0]));
+        assert!(contains_subsequence(&bytes, &[0x1d, b'!', 0x11]));
+        assert!(contains_subsequence(&bytes, &[0x1d, b'!', 0x00]));
+    }
+
+    #[test]
+    fn handlebars_values_are_not_html_escaped() {
+        let template = json!({
+            "width": 32,
+            "elements": [
+                {"type": "text", "value": "{{store.name}}"}
+            ]
+        })
+        .to_string();
+        let data = json!({
+            "store": {"name": "A&B <C>"}
+        })
+        .to_string();
+
+        let bytes = render_bytes(&template, &data);
+
+        assert!(contains_subsequence(&bytes, b"A&B <C>"));
+        assert!(!contains_subsequence(&bytes, b"&amp;"));
+    }
+
+    #[test]
+    fn columns_can_enable_bold_for_the_line() {
+        let template = json!({
+            "width": 32,
+            "elements": [
+                {"type": "columns", "columns": [
+                    {"value": "品项", "width": 16, "bold": true},
+                    {"value": "数量", "width": 16, "align": "right"}
+                ]},
+                {"type": "text", "value": "Body"}
+            ]
+        })
+        .to_string();
+        let data = json!({}).to_string();
+
+        let bytes = render_bytes(&template, &data);
+
+        assert!(contains_subsequence(&bytes, &[0x1b, b'E', 1]));
+        assert!(contains_subsequence(&bytes, &[0x1b, b'E', 0]));
     }
 
     #[test]
@@ -1551,6 +1983,15 @@ mod tests {
         }
         image.save(&path).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    fn render_bytes(template: &str, data: &str) -> Vec<u8> {
+        let result = render_receipt_inner(template, data).unwrap();
+        hex::decode(result["bytes"].as_str().unwrap()).unwrap()
+    }
+
+    fn contains_subsequence(bytes: &[u8], needle: &[u8]) -> bool {
+        bytes.windows(needle.len()).any(|window| window == needle)
     }
 
     fn parse_u16_env(name: &str) -> u16 {

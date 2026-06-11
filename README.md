@@ -7,8 +7,9 @@ Flutter + Rust 跨平台打印插件，面向 SaaS/POS 订单小票、后厨单�
 - Rust `escpos` crate 渲染 ESC/POS 指令
 - `flutter_rust_bridge` 直调 Rust（无 C Bridge 中间层）
 - 三种连接方式：**Network**（TCP/IP）、**USB**、**Serial**（串口）
+- WiFi/局域网 mDNS/DNS-SD 自动发现网络打印服务（Android 走原生 NsdManager）
 - JSON 模板 + Handlebars 动态数据（`{{store.name}}` 语法）
-- 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex
+- 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex/二维码/条码/图片
 - 内置打印类型：订单小票、后厨打印、标签打印、预结账单、退款/退菜单、外卖/配送单、自定义打印
 - 内置 58mm/80mm 小票模板选择，适合 POS 设置页或打印前选择
 - `renderReceipt` 调试模式返回十六进制字节，不下发打印机
@@ -24,18 +25,20 @@ Flutter UI → Dart API → flutter_rust_bridge 生成层 → Rust 引擎
 ```
 
 - Rust 层：模板解析、Handlebars 渲染、Printer builder 生成 ESC/POS
-- Dart 层：`PrinterConnection` 枚举选择连接方式，FRB 自动序列化
-- 不依赖 C Bridge、dart:ffi 手写绑定、CocoaPods
-- macOS 走 SPM（Swift Package Manager），Android/Linux/Windows 走 cargokit
+- Dart 层：`PrinterConnection` 枚举选择连接方式，FRB 自动序列化；Android 网络发现额外走 MethodChannel 调原生 NSD
+- 不依赖 C Bridge 或 dart:ffi 手写绑定
+- macOS 走 CocoaPods script phase + cargokit，Android/Linux/Windows 走 cargokit
 
 ## 支持平台
 
 | 平台 | Network | USB | Serial | 构建方式 |
 |------|---------|-----|--------|---------|
-| **Android** | ✅ | ✅ (USB Host) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
-| **macOS** | ✅ | ✅ (IOKit) | ✅ | SPM + cargokit |
+| **Android** | ✅ (含原生 mDNS) | ⚠️ (需 USB 授权适配) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
+| **macOS** | ✅ | ✅ (IOKit) | ✅ | CocoaPods + cargokit |
 | **Linux** | ✅ | ✅ (libusb) | ✅ | CMake + cargokit |
 | **Windows** | ✅ | ✅ (WinUSB) | ✅ | CMake + cargokit |
+
+Android USB 需要应用层通过 `UsbManager` 完成设备发现和运行时授权；当前插件只提供 Rust/libusb 侧的扫描和直连能力，尚未封装 Android 权限请求、`device_filter`、授权回调等平台通道。生产环境建议优先使用网络打印，或在业务 App 中补齐 Android USB 授权层后再启用 USB 打印。
 
 ## 使用
 
@@ -51,6 +54,39 @@ PrinterConnection.usb(vendorId: 0x0525, productId: 0xa700);
 // 串口打印机
 PrinterConnection.serial(port: '/dev/ttyUSB0', baudRate: 115200);
 ```
+
+### 自动发现网络打印机
+
+```dart
+final result = await discoverNetworkPrinters(
+  timeout: const Duration(seconds: 3),
+);
+
+for (final printer in result.printers) {
+  print('${printer.displayName} ${printer.serviceType}');
+}
+
+final rawTcpPrinter = result.printers.firstWhere(
+  (printer) => printer.supportsRawTcp,
+);
+
+final connection = rawTcpPrinter.connection(
+  timeout: const Duration(seconds: 3),
+);
+```
+
+默认会通过 mDNS/DNS-SD 扫描 `_pdl-datastream._tcp.local.`、`_printer._tcp.local.`、`_ipp._tcp.local.`、`_ipps._tcp.local.`。扫描有超时控制，Android 使用原生 `NsdManager` 异步回调和 `MulticastLock`，macOS/Linux/Windows 通过 FRB 后台任务执行，不会阻塞 Flutter UI isolate。`_ipp/_ipps` 和非 9100 端口的 `_printer._tcp` 设备通常不是 ESC/POS raw TCP 打印机，调用方应优先选择 `supportsRawTcp == true` 的设备用于 `printReceipt`。
+
+也可以指定服务类型：
+
+```dart
+final result = await discoverNetworkPrinters(
+  timeout: const Duration(seconds: 5),
+  serviceTypes: ['_pdl-datastream._tcp.local.'],
+);
+```
+
+Android 插件 Manifest 会合并 `INTERNET`、`ACCESS_NETWORK_STATE`、`ACCESS_WIFI_STATE`、`CHANGE_WIFI_MULTICAST_STATE` 和 `NEARBY_WIFI_DEVICES`。如果业务 App targetSdk 为 33+ 且系统要求 Nearby Wi-Fi 权限，请在调用扫描前完成运行时授权；iOS 当前不考虑支持。
 
 ### 打印示例
 
@@ -98,6 +134,7 @@ await printReceipt(job);
 ```
 
 也可以把模板保存成 JSON，由服务端或本地配置下发；只要最终传入 `ReceiptTemplate(width, encoding, elements)` 即可。
+文本模式默认使用 `gbk`，适合多数中文 ESC/POS 小票机；如果打印机确认支持 UTF-8，可以把模板的 `encoding` 设置为 `utf8`。
 
 ### 打印队列
 
@@ -354,12 +391,14 @@ print('ESC/POS bytes: ${result.hex}');
 ```json
 {"type":"text","value":"{{store.name}}","align":"center","bold":true,"size":"double"}
 {"type":"row","left":"合计","right":"{{order.total}}","bold":true}
-{"type":"columns","columns":[{"value":"{{name}}","width":24},{"value":"{{qty}}","width":8,"align":"right"}]}
+{"type":"columns","columns":[{"value":"{{name}}","width":24,"bold":true},{"value":"{{qty}}","width":8,"align":"right"}]}
 {"type":"repeat","path":"items","elements":[...]}
 {"type":"divider"}
 {"type":"feed","lines":3}
 {"type":"cut"}
 {"type":"raw","hex":"1b4501"}
+{"type":"qrcode","value":"{{order.qr}}","size":5,"align":"center"}
+{"type":"barcode","system":"ean13","value":"{{order.barcode}}","align":"center"}
 {"type":"image","path":"{{receipt.imagePath}}","max_width":384,"align":"center"}
 {"type":"image","base64":"{{receipt.imageBase64}}","max_width":384,"align":"center"}
 ```

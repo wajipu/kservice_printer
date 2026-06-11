@@ -37,6 +37,10 @@ pub fn list_usb_printers() -> String {
     engine::list_usb_printers()
 }
 
+pub fn discover_network_printers(timeout_ms: u64, service_types: Vec<String>) -> String {
+    engine::discover_network_printers(timeout_ms, service_types)
+}
+
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();

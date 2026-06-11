@@ -29,6 +29,14 @@ Future<String> renderReceipt({
 Future<String> listUsbPrinters() =>
     RustLib.instance.api.crateApiPrinterListUsbPrinters();
 
+Future<String> discoverNetworkPrinters({
+  required int timeoutMs,
+  required List<String> serviceTypes,
+}) => RustLib.instance.api.crateApiPrinterDiscoverNetworkPrinters(
+  timeoutMs: timeoutMs,
+  serviceTypes: serviceTypes,
+);
+
 @freezed
 sealed class PrinterConnection with _$PrinterConnection {
   const PrinterConnection._();

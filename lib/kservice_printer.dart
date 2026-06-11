@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'src/rust/api/printer.dart' as rust_printer;
@@ -11,8 +12,12 @@ import 'src/rust/frb_generated.dart';
 export 'src/rust/api/printer.dart' show PrinterConnection;
 
 Future<void>? _rustInitFuture;
+const MethodChannel _platformChannel = MethodChannel('kservice_printer');
 
 Future<void> initKservicePrinter() {
+  if (RustLib.instance.initialized) {
+    return Future<void>.value();
+  }
   return _rustInitFuture ??= RustLib.init(
     externalLibrary: defaultTargetPlatform == TargetPlatform.macOS
         ? ExternalLibrary.process(iKnowHowToUseIt: true)
@@ -96,7 +101,7 @@ enum ReceiptPrintMode {
 
 extension ReceiptPrintModeInfo on ReceiptPrintMode {
   String get encoding => switch (this) {
-    ReceiptPrintMode.text => 'utf8',
+    ReceiptPrintMode.text => 'gbk',
     ReceiptPrintMode.image => 'image',
   };
 
@@ -189,7 +194,7 @@ const builtInReceiptTemplateOptions = <ReceiptTemplateOption>[
 class ReceiptTemplate {
   const ReceiptTemplate({
     this.width = 48,
-    this.encoding = 'utf8',
+    this.encoding = 'gbk',
     this.fontFamily,
     this.fontSize,
     required this.elements,
@@ -346,6 +351,212 @@ Future<List<UsbPrinterInfo>> listUsbPrinters() async {
   ];
 }
 
+/// mDNS/DNS-SD 发现到的网络打印设备。
+class NetworkPrinterInfo {
+  const NetworkPrinterInfo({
+    required this.serviceName,
+    required this.serviceType,
+    required this.fullname,
+    required this.hostname,
+    required this.host,
+    required this.port,
+    this.addresses = const [],
+    this.txt = const {},
+    this.supportsRawTcp = false,
+  });
+
+  /// 服务实例名称，适合 UI 展示。
+  final String serviceName;
+
+  /// mDNS 服务类型，例如 `_pdl-datastream._tcp.local.`。
+  final String serviceType;
+
+  /// mDNS 完整服务名。
+  final String fullname;
+
+  /// 服务主机名。
+  final String hostname;
+
+  /// 推荐连接地址，优先 IPv4，其次其它解析地址，最后 hostname。
+  final String host;
+
+  /// 服务端口。
+  final int port;
+
+  /// mDNS 返回的所有地址。
+  final List<String> addresses;
+
+  /// TXT record 属性。
+  final Map<String, String> txt;
+
+  /// 是否看起来支持 ESC/POS raw TCP 直连。
+  ///
+  /// `_pdl-datastream._tcp` 或 9100 端口会被标记为 true。
+  final bool supportsRawTcp;
+
+  String get displayName {
+    final label = serviceName.isNotEmpty
+        ? serviceName
+        : (hostname.isNotEmpty ? hostname : host);
+    return '$label · $host:$port';
+  }
+
+  PrinterConnection connection({
+    Duration timeout = const Duration(seconds: 3),
+  }) {
+    return PrinterConnection.network(
+      host: host,
+      port: port,
+      timeoutMs: timeout.inMilliseconds,
+    );
+  }
+
+  factory NetworkPrinterInfo.fromJson(Map<String, dynamic> json) {
+    return NetworkPrinterInfo(
+      serviceName: json['serviceName']?.toString() ?? '',
+      serviceType: json['serviceType']?.toString() ?? '',
+      fullname: json['fullname']?.toString() ?? '',
+      hostname: json['hostname']?.toString() ?? '',
+      host: json['host']?.toString() ?? '',
+      port: json['port'] is num ? (json['port'] as num).toInt() : 0,
+      addresses: _stringList(json['addresses']),
+      txt: _stringMap(json['txt']),
+      supportsRawTcp: json['supportsRawTcp'] == true,
+    );
+  }
+}
+
+/// 网络打印机发现结果。
+class NetworkPrinterDiscoveryResult {
+  const NetworkPrinterDiscoveryResult({
+    required this.printers,
+    required this.serviceTypes,
+    required this.timeoutMs,
+    required this.durationMs,
+    required this.timedOut,
+  });
+
+  final List<NetworkPrinterInfo> printers;
+  final List<String> serviceTypes;
+  final int timeoutMs;
+  final int durationMs;
+
+  /// true 表示扫描跑满了指定超时；false 通常只会出现在平台快速失败等情况。
+  final bool timedOut;
+
+  factory NetworkPrinterDiscoveryResult.fromJson(Map<String, dynamic> json) {
+    final printers = json['printers'];
+    return NetworkPrinterDiscoveryResult(
+      printers: [
+        if (printers is List)
+          for (final item in printers)
+            if (item is Map<String, dynamic>) NetworkPrinterInfo.fromJson(item),
+      ],
+      serviceTypes: _stringList(json['serviceTypes']),
+      timeoutMs: json['timeoutMs'] is num
+          ? (json['timeoutMs'] as num).toInt()
+          : 0,
+      durationMs: json['durationMs'] is num
+          ? (json['durationMs'] as num).toInt()
+          : 0,
+      timedOut: json['timedOut'] == true,
+    );
+  }
+}
+
+/// 通过 mDNS/DNS-SD 扫描局域网/WiFi 中可见的网络打印服务。
+///
+/// 默认服务类型包含 `_pdl-datastream._tcp.local.`、`_printer._tcp.local.`、
+/// `_ipp._tcp.local.` 和 `_ipps._tcp.local.`。Android 走原生 `NsdManager`，
+/// 其它桌面平台走 Rust/FRB 后台任务，调用 Dart Future 不会阻塞 Flutter UI
+/// isolate。
+Future<NetworkPrinterDiscoveryResult> discoverNetworkPrinters({
+  Duration timeout = const Duration(seconds: 3),
+  List<String> serviceTypes = const [],
+}) async {
+  return _networkDiscoveryQueue.enqueue(
+    () => _discoverNetworkPrintersNow(
+      timeout: timeout,
+      serviceTypes: serviceTypes,
+    ),
+  );
+}
+
+Future<NetworkPrinterDiscoveryResult> _discoverNetworkPrintersNow({
+  required Duration timeout,
+  required List<String> serviceTypes,
+}) async {
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final response = await _platformChannel.invokeMethod<String>(
+      'discoverNetworkPrinters',
+      {'timeoutMs': timeout.inMilliseconds, 'serviceTypes': serviceTypes},
+    );
+    return _decodeNetworkPrinterDiscoveryResponse(response);
+  }
+
+  await initKservicePrinter();
+  final response = await rust_printer.discoverNetworkPrinters(
+    timeoutMs: timeout.inMilliseconds,
+    serviceTypes: serviceTypes,
+  );
+  return _decodeNetworkPrinterDiscoveryResponse(response);
+}
+
+/// 当前排队或执行中的网络发现任务数量。
+int get activeNetworkDiscoveryCount => _networkDiscoveryQueue.activeTaskCount;
+
+NetworkPrinterDiscoveryResult _decodeNetworkPrinterDiscoveryResponse(
+  String? response,
+) {
+  if (response == null || response.isEmpty) {
+    throw StateError('网络打印机扫描未返回结果');
+  }
+  final json = jsonDecode(response) as Map<String, dynamic>;
+  if (json['ok'] != true) {
+    throw StateError(json['error']?.toString() ?? '网络打印机扫描失败');
+  }
+  final result = json['result'];
+  if (result is! Map<String, dynamic>) {
+    return const NetworkPrinterDiscoveryResult(
+      printers: [],
+      serviceTypes: [],
+      timeoutMs: 0,
+      durationMs: 0,
+      timedOut: false,
+    );
+  }
+  return NetworkPrinterDiscoveryResult.fromJson(result);
+}
+
+/// 只返回扫描到的网络打印设备列表。
+Future<List<NetworkPrinterInfo>> listNetworkPrinters({
+  Duration timeout = const Duration(seconds: 3),
+  List<String> serviceTypes = const [],
+}) async {
+  return (await discoverNetworkPrinters(
+    timeout: timeout,
+    serviceTypes: serviceTypes,
+  )).printers;
+}
+
+List<String> _stringList(Object? value) {
+  if (value is! List) {
+    return const [];
+  }
+  return [for (final item in value) item.toString()];
+}
+
+Map<String, String> _stringMap(Object? value) {
+  if (value is! Map) {
+    return const {};
+  }
+  return {
+    for (final entry in value.entries)
+      entry.key.toString(): entry.value?.toString() ?? '',
+  };
+}
+
+final _networkDiscoveryQueue = _SerialTaskQueue();
 final _printQueue = _PrinterQueue();
 
 extension PrinterConnectionQueueKey on PrinterConnection {
@@ -443,6 +654,32 @@ class _PrinterQueue {
       }
     });
     _tails[key] = queuedTail;
+
+    return completer.future;
+  }
+}
+
+class _SerialTaskQueue {
+  Future<void> _tail = Future<void>.value();
+  int _activeTaskCount = 0;
+
+  int get activeTaskCount => _activeTaskCount;
+
+  Future<T> enqueue<T>(FutureOr<T> Function() task) {
+    final completer = Completer<T>();
+    _activeTaskCount += 1;
+
+    final next = _tail.catchError((_) {}).then((_) async {
+      try {
+        completer.complete(await task());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+
+    _tail = next.whenComplete(() {
+      _activeTaskCount -= 1;
+    });
 
     return completer.future;
   }
