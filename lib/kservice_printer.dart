@@ -831,7 +831,7 @@ ReceiptTemplate defaultOrderReceiptTemplate({int width = 48}) {
               },
             ],
           },
-          {'type': 'text', 'value': '{{remark}}'},
+          _receiptNoteElement(label: '备注', value: 'remark', width: width),
         ],
       },
       {'type': 'divider'},
@@ -840,6 +840,52 @@ ReceiptTemplate defaultOrderReceiptTemplate({int width = 48}) {
       {'type': 'cut'},
     ],
   );
+}
+
+Map<String, Object?> _receiptNoteElement({
+  required String label,
+  required String value,
+  required int width,
+  bool bold = false,
+  int indent = 2,
+}) {
+  final prefix = '${' ' * indent}$label：';
+  final prefixWidth = _receiptTextWidth(prefix);
+  if (width <= prefixWidth) {
+    return {
+      'type': 'columns',
+      'columns': [
+        {
+          'value': '{{#if $value}}$prefix{{$value}}{{/if}}',
+          'width': width,
+          if (bold) 'bold': true,
+        },
+      ],
+    };
+  }
+  return {
+    'type': 'columns',
+    'columns': [
+      {
+        'value': '{{#if $value}}$prefix{{/if}}',
+        'width': prefixWidth,
+        if (bold) 'bold': true,
+      },
+      {
+        'value': '{{#if $value}}{{$value}}{{/if}}',
+        'width': width - prefixWidth,
+        if (bold) 'bold': true,
+      },
+    ],
+  };
+}
+
+int _receiptTextWidth(String value) {
+  var width = 0;
+  for (final rune in value.runes) {
+    width += rune <= 0x7f ? 1 : 2;
+  }
+  return width;
 }
 
 /// 图片化订单小票模板。
@@ -910,12 +956,23 @@ ReceiptTemplate defaultKitchenTicketTemplate({int width = 48}) {
                 {'value': 'x{{qty}}', 'width': qtyWidth, 'align': 'right'},
             ],
           },
-          {'type': 'text', 'value': '{{spec}}'},
-          {'type': 'text', 'value': '{{remark}}', 'bold': true},
+          _receiptNoteElement(label: '规格', value: 'spec', width: width),
+          _receiptNoteElement(
+            label: '备注',
+            value: 'remark',
+            width: width,
+            bold: true,
+          ),
           {'type': 'divider'},
         ],
       },
-      {'type': 'text', 'value': '{{order.remark}}', 'bold': true},
+      _receiptNoteElement(
+        label: '整单备注',
+        value: 'order.remark',
+        width: width,
+        bold: true,
+        indent: 0,
+      ),
       {'type': 'feed', 'lines': 3},
       {'type': 'cut'},
     ],

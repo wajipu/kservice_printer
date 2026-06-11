@@ -1671,6 +1671,22 @@ mod tests {
     }
 
     #[test]
+    fn wraps_note_columns_with_hanging_indent() {
+        let lines = format_columns(&[
+            ("  备注：".to_string(), 8, Align::Left),
+            ("不要洋葱不要香菜需要分开打包".to_string(), 12, Align::Left),
+        ]);
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(display_width(&lines[0]), 20);
+        assert_eq!(display_width(&lines[1]), 20);
+        assert_eq!(display_width(&lines[2]), 20);
+        assert!(lines[0].starts_with("  备注："));
+        assert!(lines[1].starts_with("        "));
+        assert!(lines[2].starts_with("        "));
+    }
+
+    #[test]
     fn truncates_long_column_without_overflowing_width() {
         let value = fit_text("超长商品名称", 8, Align::Left);
 

@@ -107,6 +107,42 @@ void main() {
     expect(columns80.map((column) => column['width']), [24, 8, 16]);
   });
 
+  test('formats receipt item remarks with label and hanging indent', () {
+    final template = defaultOrderReceiptTemplate(
+      width: ReceiptPaperSize.mm58.width,
+    );
+    final repeat = template.elements[7];
+    final repeatElements = repeat['elements']! as List<Map<String, Object?>>;
+    final remark = repeatElements[1];
+    final remarkColumns = remark['columns']! as List<Map<String, Object?>>;
+
+    expect(remark['type'], 'columns');
+    expect(remarkColumns[0]['value'], '{{#if remark}}  备注：{{/if}}');
+    expect(remarkColumns[0]['width'], 8);
+    expect(remarkColumns[1]['value'], '{{#if remark}}{{remark}}{{/if}}');
+    expect(remarkColumns[1]['width'], 24);
+  });
+
+  test('formats kitchen remarks with labels', () {
+    final template = defaultKitchenTicketTemplate(
+      width: ReceiptPaperSize.mm58.width,
+    );
+    final repeat = template.elements[7];
+    final repeatElements = repeat['elements']! as List<Map<String, Object?>>;
+    final specColumns =
+        repeatElements[1]['columns']! as List<Map<String, Object?>>;
+    final itemRemarkColumns =
+        repeatElements[2]['columns']! as List<Map<String, Object?>>;
+    final orderRemarkColumns =
+        template.elements[8]['columns']! as List<Map<String, Object?>>;
+
+    expect(specColumns[0]['value'], '{{#if spec}}  规格：{{/if}}');
+    expect(itemRemarkColumns[0]['value'], '{{#if remark}}  备注：{{/if}}');
+    expect(itemRemarkColumns[0]['bold'], true);
+    expect(orderRemarkColumns[0]['value'], '{{#if order.remark}}整单备注：{{/if}}');
+    expect(orderRemarkColumns[0]['width'], 10);
+  });
+
   test('builds image order template for complex scripts', () {
     final template = defaultOrderReceiptImageTemplate(
       width: 32,
