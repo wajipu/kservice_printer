@@ -1,17 +1,17 @@
 # kservice_printer
 
-Flutter + Rust 跨平台打印插件，面向 SaaS/POS 订单小票、后厨单、标签等 ESC/POS 打印。
+Flutter + Rust 跨平台打印插件，面向 SaaS/POS 订单小票、后厨单、标签打印。
 
 ## 能力
 
-- Rust `escpos` crate 渲染 ESC/POS 指令
+- Rust `escpos` crate 渲染 ESC/POS 小票指令，内置 TSPL 标签指令渲染
 - `flutter_rust_bridge` 直调 Rust（无 C Bridge 中间层）
 - 三种连接方式：**Network**（TCP/IP）、**USB**、**Serial**（串口）
 - WiFi/局域网 mDNS/DNS-SD 自动发现网络打印服务（Android 走原生 NsdManager）
 - JSON 模板 + Handlebars 动态数据（`{{store.name}}` 语法）
-- 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex/二维码/条码/图片
+- 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex/二维码/条码/图片；TSPL 标签模式支持文本、分隔线、二维码和条码
 - 内置打印类型：订单小票、后厨打印、标签打印、预结账单、退款/退菜单、外卖/配送单、自定义打印
-- 内置 58mm/80mm 小票模板选择，适合 POS 设置页或打印前选择
+- 内置 58mm/80mm 小票模板和 58mm TSPL 标签模板选择，适合 POS 设置页或打印前选择
 - `renderReceipt` 调试模式返回十六进制字节，不下发打印机
 
 ## 架构
@@ -24,7 +24,7 @@ Flutter UI → Dart API → flutter_rust_bridge 生成层 → Rust 引擎
                                                      real_printer / VecDriver(调试)
 ```
 
-- Rust 层：模板解析、Handlebars 渲染、Printer builder 生成 ESC/POS
+- Rust 层：模板解析、Handlebars 渲染，按模板编码生成 ESC/POS 或 TSPL 指令
 - Dart 层：`PrinterConnection` 枚举选择连接方式，FRB 自动序列化；Android 网络发现额外走 MethodChannel 调原生 NSD
 - 不依赖 C Bridge 或 dart:ffi 手写绑定
 - macOS 走 CocoaPods script phase + cargokit，Android/Linux/Windows 走 cargokit
@@ -387,11 +387,11 @@ final kitchenJob = PrintJob(
   },
 );
 
-// 标签打印
+// TSPL 标签机打印
 final labelJob = PrintJob(
   type: PrintJobType.label,
   connection: const PrinterConnection.network(host: '192.168.1.101', port: 9100, timeoutMs: 3000),
-  template: defaultLabelTemplate(),
+  template: defaultTsplLabelTemplate(widthMm: 58, heightMm: 40),
   data: {
     'item': {'name': '招牌牛肉饭', 'spec': '中份', 'sku': 'BEEF-001', 'qty': '1', 'price': '¥29.00'},
     'label': {'remark': '冷藏保存'},
@@ -406,7 +406,62 @@ await printJob(labelJob);
 
 ```dart
 final result = await renderReceipt(job);
-print('ESC/POS bytes: ${result.hex}');
+print('printer command bytes: ${result.hex}');
+```
+
+### TSPL 标签机
+
+标签机和传统账单/小票机通常不是同一种打印语言。小票机常用 ESC/POS；TSC 兼容标签机常用 TSPL。连接方式仍然可以是 USB、Network 或 Serial，但模板需要使用 `encoding: "tspl"`，或者直接用 `defaultTsplLabelTemplate()`。
+
+```dart
+final job = PrintJob(
+  type: PrintJobType.label,
+  connection: const PrinterConnection.usb(vendorId: 0x0483, productId: 0x5743),
+  template: defaultTsplLabelTemplate(widthMm: 58, heightMm: 40, gapMm: 2),
+  data: {
+    'item': {'name': '招牌牛肉饭', 'spec': '大份', 'sku': 'BEEF-001', 'qty': '1', 'price': '¥29.00'},
+    'label': {'remark': '冷藏保存'},
+  },
+);
+
+await printJob(job);
+```
+
+`defaultTsplLabelTemplate()` 默认会在 `CLS/PRINT` 前下发 `HOME`，让打印机根据标签间隙传感器把纸定位到下一张标签起点。换纸、首次安装或打印从半张标签开始时，先在打印机面板/厂商工具执行一次 Gap 校准；部分 TSC/Xprinter 兼容机也可直接发送 `GAPDETECT` 原始 TSPL 指令做校准。TSPL 通常拿不到“当前纸张绝对坐标”，只能查询少量状态或主动执行 `HOME`/`FORMFEED`/`GAPDETECT` 让设备重新定位。
+
+维吾尔语、阿拉伯语等复杂文字不要用普通 TSPL `TEXT` 字库，建议使用 TSPL 图片标签模式。插件会把整张标签渲染成位图，再用 TSPL `BITMAP` 指令打印：
+
+```dart
+final job = PrintJob(
+  type: PrintJobType.label,
+  connection: const PrinterConnection.network(host: '192.168.1.101', port: 9100, timeoutMs: 3000),
+  template: defaultTsplLabelImageTemplate(
+    widthMm: 58,
+    heightMm: 40,
+    gapMm: 2,
+    fontFamily: 'Noto Sans Arabic',
+    fontSize: 24,
+  ),
+  data: {
+    'item': {'name': 'لاڭمەن', 'spec': 'چوڭ', 'sku': 'BEEF-001', 'qty': '1', 'price': '¥29.00'},
+    'label': {'remark': 'سوغۇق ساقلاڭ'},
+  },
+);
+
+await printJob(job);
+```
+
+如果纸张机械位置已经准，但内容整体偏移，可以用模板参数微调：
+
+```dart
+template: defaultTsplLabelTemplate(
+  widthMm: 58,
+  heightMm: 40,
+  gapMm: 2,
+  referenceX: 0,
+  referenceY: 0,
+  shiftDots: 0,
+),
 ```
 
 ## 模板元素

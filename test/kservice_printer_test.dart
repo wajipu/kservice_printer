@@ -85,6 +85,47 @@ void main() {
     expect(template.elements.first['value'], '{{item.name}}');
   });
 
+  test('builds TSPL label template for label printers', () {
+    final template = defaultTemplateForPrintJobType(
+      PrintJobType.label,
+      paperSize: ReceiptPaperSize.mm58,
+      mode: ReceiptPrintMode.tspl,
+    );
+
+    expect(template.width, 32);
+    expect(template.encoding, 'tspl');
+    expect(template.labelWidthMm, 58);
+    expect(template.labelHeightMm, 40);
+    expect(template.labelGapMm, 2);
+    expect(template.labelHomeBeforePrint, isTrue);
+    expect(template.toJson()['labelWidthMm'], 58);
+    expect(template.toJson()['labelHomeBeforePrint'], isTrue);
+    expect(template.elements.first['value'], '{{item.name}}');
+    expect(template.elements.last['type'], 'qrcode');
+    expect(template.elements.last['size'], 2);
+    expect(template.elements.last['x'], 304);
+    expect(template.elements.last['y'], 192);
+  });
+
+  test('builds TSPL image label template for complex scripts', () {
+    final template = defaultTemplateForPrintJobType(
+      PrintJobType.label,
+      paperSize: ReceiptPaperSize.mm58,
+      mode: ReceiptPrintMode.tsplImage,
+      fontFamily: 'Noto Sans Arabic',
+      fontSize: 24,
+    );
+
+    expect(template.width, 32);
+    expect(template.encoding, 'tspl-image');
+    expect(template.fontFamily, 'Noto Sans Arabic');
+    expect(template.fontSize, 24);
+    expect(template.labelWidthMm, 58);
+    expect(template.labelHeightMm, 40);
+    expect(template.labelHomeBeforePrint, isTrue);
+    expect(template.elements.last['type'], 'qrcode');
+  });
+
   test('builds templates for 58mm and 80mm receipt paper', () {
     final template58 = defaultTemplateForPrintJobType(
       PrintJobType.receipt,
@@ -183,6 +224,8 @@ void main() {
         '订单小票 · 80mm 小票 · 图片打印',
         '后厨打印 · 58mm 小票 · 文本打印',
         '后厨打印 · 80mm 小票 · 文本打印',
+        '标签打印 · 58mm 标签 · TSPL 标签',
+        '标签打印 · 58mm 标签 · TSPL 图片标签',
       ]),
     );
 

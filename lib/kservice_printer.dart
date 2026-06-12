@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -97,17 +98,27 @@ enum ReceiptPrintMode {
 
   /// 先将整张小票渲染成临时图片再打印，适合打印机字体不支持的语言。
   image,
+
+  /// 使用 TSPL 标签语言，适合 TSC 兼容标签打印机。
+  tspl,
+
+  /// 将整张标签渲染成 TSPL 位图，适合复杂文字和精确版式。
+  tsplImage,
 }
 
 extension ReceiptPrintModeInfo on ReceiptPrintMode {
   String get encoding => switch (this) {
     ReceiptPrintMode.text => 'gbk',
     ReceiptPrintMode.image => 'image',
+    ReceiptPrintMode.tspl => 'tspl',
+    ReceiptPrintMode.tsplImage => 'tspl-image',
   };
 
   String get displayName => switch (this) {
     ReceiptPrintMode.text => '文本打印',
     ReceiptPrintMode.image => '图片打印',
+    ReceiptPrintMode.tspl => 'TSPL 标签',
+    ReceiptPrintMode.tsplImage => 'TSPL 图片标签',
   };
 }
 
@@ -125,8 +136,17 @@ class ReceiptTemplateOption {
 
   String get code => '${type.code}_${paperSize.name}_${mode.name}';
 
+  String get paperDisplayName =>
+      type == PrintJobType.label &&
+          (mode == ReceiptPrintMode.tspl || mode == ReceiptPrintMode.tsplImage)
+      ? switch (paperSize) {
+          ReceiptPaperSize.mm58 => '58mm 标签',
+          ReceiptPaperSize.mm80 => '80mm 标签',
+        }
+      : paperSize.displayName;
+
   String get displayName =>
-      '${type.displayName} · ${paperSize.displayName} · ${mode.displayName}';
+      '${type.displayName} · $paperDisplayName · ${mode.displayName}';
 
   ReceiptTemplate buildTemplate() =>
       defaultTemplateForPrintJobType(type, paperSize: paperSize, mode: mode);
@@ -187,6 +207,16 @@ const builtInReceiptTemplateOptions = <ReceiptTemplateOption>[
   ReceiptTemplateOption(
     type: PrintJobType.label,
     paperSize: ReceiptPaperSize.mm58,
+    mode: ReceiptPrintMode.tspl,
+  ),
+  ReceiptTemplateOption(
+    type: PrintJobType.label,
+    paperSize: ReceiptPaperSize.mm58,
+    mode: ReceiptPrintMode.tsplImage,
+  ),
+  ReceiptTemplateOption(
+    type: PrintJobType.label,
+    paperSize: ReceiptPaperSize.mm58,
   ),
 ];
 
@@ -197,6 +227,15 @@ class ReceiptTemplate {
     this.encoding = 'gbk',
     this.fontFamily,
     this.fontSize,
+    this.labelWidthMm,
+    this.labelHeightMm,
+    this.labelGapMm,
+    this.labelDensity,
+    this.labelSpeed,
+    this.labelHomeBeforePrint,
+    this.labelReferenceX,
+    this.labelReferenceY,
+    this.labelShiftDots,
     required this.elements,
   });
 
@@ -204,6 +243,15 @@ class ReceiptTemplate {
   final String encoding;
   final String? fontFamily;
   final double? fontSize;
+  final double? labelWidthMm;
+  final double? labelHeightMm;
+  final double? labelGapMm;
+  final int? labelDensity;
+  final int? labelSpeed;
+  final bool? labelHomeBeforePrint;
+  final int? labelReferenceX;
+  final int? labelReferenceY;
+  final int? labelShiftDots;
   final List<Map<String, Object?>> elements;
 
   Map<String, Object?> toJson() => {
@@ -211,6 +259,16 @@ class ReceiptTemplate {
     'encoding': encoding,
     if (fontFamily != null) 'fontFamily': fontFamily,
     if (fontSize != null) 'fontSize': fontSize,
+    if (labelWidthMm != null) 'labelWidthMm': labelWidthMm,
+    if (labelHeightMm != null) 'labelHeightMm': labelHeightMm,
+    if (labelGapMm != null) 'labelGapMm': labelGapMm,
+    if (labelDensity != null) 'labelDensity': labelDensity,
+    if (labelSpeed != null) 'labelSpeed': labelSpeed,
+    if (labelHomeBeforePrint != null)
+      'labelHomeBeforePrint': labelHomeBeforePrint,
+    if (labelReferenceX != null) 'labelReferenceX': labelReferenceX,
+    if (labelReferenceY != null) 'labelReferenceY': labelReferenceY,
+    if (labelShiftDots != null) 'labelShiftDots': labelShiftDots,
     'elements': elements,
   };
 }
@@ -847,7 +905,7 @@ Future<RenderResult> renderReceipt(PrintJob job) async {
   return RenderResult.fromJson(jsonDecode(response) as Map<String, dynamic>);
 }
 
-/// 按任务类型打印。兼容所有模板类型，底层仍使用 ESC/POS 模板渲染。
+/// 按任务类型打印。兼容 ESC/POS 小票模板和 TSPL 标签模板。
 Future<PrintResult> printJob(PrintJob job, {bool queued = true}) =>
     printReceipt(job, queued: queued);
 
@@ -1007,6 +1065,22 @@ ReceiptTemplate defaultTemplateForPrintJobType(
   double? fontSize,
 }) {
   final templateWidth = width ?? paperSize?.width;
+  if (type == PrintJobType.label && mode == ReceiptPrintMode.tsplImage) {
+    return defaultTsplLabelImageTemplate(
+      width: templateWidth ?? ReceiptPaperSize.mm58.width,
+      widthMm: _labelWidthMmForPaper(paperSize),
+      fontFamily: fontFamily,
+      fontSize: fontSize,
+    );
+  }
+
+  if (type == PrintJobType.label && mode == ReceiptPrintMode.tspl) {
+    return defaultTsplLabelTemplate(
+      width: templateWidth ?? ReceiptPaperSize.mm58.width,
+      widthMm: _labelWidthMmForPaper(paperSize),
+    );
+  }
+
   final template = switch (type) {
     PrintJobType.kitchen => defaultKitchenTicketTemplate(
       width: templateWidth ?? ReceiptPaperSize.mm80.width,
@@ -1025,6 +1099,13 @@ ReceiptTemplate defaultTemplateForPrintJobType(
   return mode == ReceiptPrintMode.image
       ? template.asImageTemplate(fontFamily: fontFamily, fontSize: fontSize)
       : template;
+}
+
+double _labelWidthMmForPaper(ReceiptPaperSize? paperSize) {
+  return switch (paperSize) {
+    ReceiptPaperSize.mm80 => 80,
+    ReceiptPaperSize.mm58 || null => 58,
+  };
 }
 
 /// SaaS/POS 默认订单小票模板。
@@ -1157,6 +1238,45 @@ extension ReceiptTemplateMode on ReceiptTemplate {
       encoding: ReceiptPrintMode.image.encoding,
       fontFamily: fontFamily ?? this.fontFamily,
       fontSize: fontSize ?? this.fontSize,
+      labelWidthMm: labelWidthMm,
+      labelHeightMm: labelHeightMm,
+      labelGapMm: labelGapMm,
+      labelDensity: labelDensity,
+      labelSpeed: labelSpeed,
+      labelHomeBeforePrint: labelHomeBeforePrint,
+      labelReferenceX: labelReferenceX,
+      labelReferenceY: labelReferenceY,
+      labelShiftDots: labelShiftDots,
+      elements: elements,
+    );
+  }
+
+  /// 将现有模板改成 TSPL 标签语言输出。
+  ReceiptTemplate asTsplLabelTemplate({
+    double widthMm = 58,
+    double heightMm = 40,
+    double gapMm = 2,
+    int density = 8,
+    int speed = 4,
+    bool homeBeforePrint = true,
+    int? referenceX,
+    int? referenceY,
+    int? shiftDots,
+  }) {
+    return ReceiptTemplate(
+      width: width,
+      encoding: ReceiptPrintMode.tspl.encoding,
+      fontFamily: fontFamily,
+      fontSize: fontSize,
+      labelWidthMm: widthMm,
+      labelHeightMm: heightMm,
+      labelGapMm: gapMm,
+      labelDensity: density,
+      labelSpeed: speed,
+      labelHomeBeforePrint: homeBeforePrint,
+      labelReferenceX: referenceX,
+      labelReferenceY: referenceY,
+      labelShiftDots: shiftDots,
       elements: elements,
     );
   }
@@ -1246,5 +1366,111 @@ ReceiptTemplate defaultLabelTemplate({int width = 32}) {
       {'type': 'feed', 'lines': 2},
       {'type': 'cut'},
     ],
+  );
+}
+
+/// TSPL 标签打印模板，适合 TSC 兼容标签机。
+///
+/// 这类设备与传统 ESC/POS 小票机不同，通常不会响应小票初始化、走纸和切刀指令。
+ReceiptTemplate defaultTsplLabelTemplate({
+  int width = 32,
+  double widthMm = 58,
+  double heightMm = 40,
+  double gapMm = 2,
+  int density = 8,
+  int speed = 4,
+  bool homeBeforePrint = true,
+  int? referenceX,
+  int? referenceY,
+  int? shiftDots,
+}) {
+  const dotsPerMm = 8;
+  const qrSize = 2;
+  final labelWidthDots = (widthMm * dotsPerMm).round();
+  final labelHeightDots = (heightMm * dotsPerMm).round();
+  final qrX = math.max(24, labelWidthDots - 160);
+  final qrY = math.max(24, labelHeightDots - 128);
+
+  return ReceiptTemplate(
+    width: width,
+    encoding: ReceiptPrintMode.tspl.encoding,
+    labelWidthMm: widthMm,
+    labelHeightMm: heightMm,
+    labelGapMm: gapMm,
+    labelDensity: density,
+    labelSpeed: speed,
+    labelHomeBeforePrint: homeBeforePrint,
+    labelReferenceX: referenceX,
+    labelReferenceY: referenceY,
+    labelShiftDots: shiftDots,
+    elements: [
+      {
+        'type': 'text',
+        'value': '{{item.name}}',
+        'align': 'center',
+        'bold': true,
+        'size': 'double',
+      },
+      {'type': 'divider'},
+      {'type': 'row', 'left': '规格', 'right': '{{item.spec}}'},
+      {'type': 'row', 'left': 'SKU', 'right': '{{item.sku}}'},
+      {'type': 'row', 'left': '数量', 'right': '{{item.qty}}'},
+      {'type': 'row', 'left': '价格', 'right': '{{item.price}}'},
+      {'type': 'text', 'value': '{{label.remark}}', 'align': 'center'},
+      {
+        'type': 'qrcode',
+        'value': '{{item.sku}}',
+        'size': qrSize,
+        'x': qrX,
+        'y': qrY,
+      },
+    ],
+  );
+}
+
+/// TSPL 图片标签模板。
+///
+/// 适合维吾尔语、阿拉伯语等需要字体 fallback、连写和方向处理的标签。
+ReceiptTemplate defaultTsplLabelImageTemplate({
+  int width = 32,
+  double widthMm = 58,
+  double heightMm = 40,
+  double gapMm = 2,
+  int density = 8,
+  int speed = 4,
+  String? fontFamily,
+  double? fontSize,
+  bool homeBeforePrint = true,
+  int? referenceX,
+  int? referenceY,
+  int? shiftDots,
+}) {
+  final template = defaultTsplLabelTemplate(
+    width: width,
+    widthMm: widthMm,
+    heightMm: heightMm,
+    gapMm: gapMm,
+    density: density,
+    speed: speed,
+    homeBeforePrint: homeBeforePrint,
+    referenceX: referenceX,
+    referenceY: referenceY,
+    shiftDots: shiftDots,
+  );
+  return ReceiptTemplate(
+    width: template.width,
+    encoding: ReceiptPrintMode.tsplImage.encoding,
+    fontFamily: fontFamily,
+    fontSize: fontSize,
+    labelWidthMm: template.labelWidthMm,
+    labelHeightMm: template.labelHeightMm,
+    labelGapMm: template.labelGapMm,
+    labelDensity: template.labelDensity,
+    labelSpeed: template.labelSpeed,
+    labelHomeBeforePrint: template.labelHomeBeforePrint,
+    labelReferenceX: template.labelReferenceX,
+    labelReferenceY: template.labelReferenceY,
+    labelShiftDots: template.labelShiftDots,
+    elements: template.elements,
   );
 }

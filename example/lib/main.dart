@@ -147,7 +147,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
 
   Future<void> _render() async {
     await _runAction(
-      running: '正在渲染 ESC/POS...',
+      running: '正在渲染打印指令...',
       action: () async {
         final result = await renderReceipt(_job);
         return result.ok
@@ -702,7 +702,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
         DropdownButtonFormField<ReceiptTemplateOption>(
           initialValue: _selectedTemplate,
           decoration: const InputDecoration(
-            labelText: '小票模板',
+            labelText: '打印模板',
             prefixIcon: Icon(Icons.view_list),
           ),
           items: [
@@ -747,7 +747,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
         FilledButton.icon(
           onPressed: _busy ? null : _render,
           icon: const Icon(Icons.memory),
-          label: const Text('仅渲染 ESC/POS'),
+          label: const Text('仅渲染指令'),
         ),
         FilledButton.icon(
           onPressed: _busy ? null : () => _print(queued: true),
