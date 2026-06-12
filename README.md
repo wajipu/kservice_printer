@@ -18,10 +18,32 @@ Flutter + Rust 跨平台打印插件，面向 SaaS/POS 订单小票、后厨单�
 
 ```text
 Flutter UI → Dart API → flutter_rust_bridge 生成层 → Rust 引擎
-                                                           ↓
-                                              NetworkDriver / NativeUsbDriver / SerialPortDriver
-                                                           ↓
-                                                     real_printer / VecDriver(调试)
+                                                            ↓
+                                               TcpDriver / USB driver / SerialPortDriver
+                                                            ↓
+                                                      real_printer / VecDriver(调试)
+```
+
+### Rust 模块结构
+
+```text
+rust_printer_core/src/
+├── lib.rs              # crate 根文件，注册所有模块
+├── engine.rs           # 核心编排：print_receipt、render_receipt、build_printer、render_element
+├── error.rs            # PrinterError 错误类型定义
+├── template.rs         # 模板解析(parse_template)、类型定义(Template/Element/Align 等)
+├── discovery.rs        # 网络发现(mDNS/USB list)
+├── util.rs             # 通用工具(into_response/justify_mode/has_cut_element)
+├── api/
+│   └── printer.rs      # PrinterConnection 枚举(FRB 公开类型)
+├── protocol/
+│   └── tspl.rs         # TSPL 标签指令渲染
+└── render/
+    ├── mod.rs
+    ├── encoding.rs      # 文本编码(GBK/UTF-8 互转)
+    ├── image.rs         # 图片渲染(TempImageFile/render_lines_to_image/BitImageOption)
+    ├── layout.rs        # 文字布局(format_row/format_columns/fit_text/display_width)
+    └── value.rs         # Handlebars 渲染(render_value/value_ref/hex_decode)
 ```
 
 - Rust 层：模板解析、Handlebars 渲染，按模板编码生成 ESC/POS 或 TSPL 指令
@@ -36,7 +58,7 @@ Flutter UI → Dart API → flutter_rust_bridge 生成层 → Rust 引擎
 | **Android** | ✅ (含原生 mDNS) | ⚠️ (原生扫描；打印需 USB 授权适配) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
 | **macOS** | ✅ | ✅ (IOKit) | ✅ | CocoaPods + cargokit |
 | **Linux** | ✅ | ✅ (libusb) | ✅ | CMake + cargokit |
-| **Windows** | ✅ | ✅ (WinUSB) | ✅ | CMake + cargokit |
+| **Windows** | ✅ | ✅ (`usbprint.sys`) | ✅ | CMake + cargokit |
 
 Android USB 扫描通过原生 `UsbManager` 执行，默认只返回系统识别为 USB printer class 的设备，并会返回设备的 `hasPermission` 状态；插件 Manifest 会合并 `android.hardware.usb.host`。可以调用 `requestUsbPrinterPermission(printer)` 触发 Android 系统 USB 设备授权弹窗。Android USB 打印仍需要单独适配 `UsbManager.openDevice()` 授权后的 file descriptor 写入通道，因为当前 Rust `UsbDriver` 不能直接消费 Android 授权后返回的 file descriptor。生产环境建议优先使用网络打印，或在业务 App 中补齐 Android USB 打印通道后再启用 USB 打印。
 
@@ -107,7 +129,7 @@ final allUsbDevices = await listUsbPrinters(includeNonPrinters: true);
 - macOS：如果宿主 App 开启 App Sandbox，USB 扫描/打印需要 `com.apple.security.device.usb`，网络打印和 mDNS 发现需要 `com.apple.security.network.client`；mDNS 接收响应时建议同时保留 `com.apple.security.network.server`。示例 App 已配置。
 - Android：网络发现的 manifest 权限已由插件合并；Android 13+ 的 `NEARBY_WIFI_DEVICES` 是运行时权限，需要业务 App 在扫描前请求。`listUsbPrinters()` 走原生 `UsbManager` 扫描，默认过滤非打印机设备；返回的 `UsbPrinterInfo.hasPermission` 表示系统是否已授权该 USB 设备；`requestUsbPrinterPermission(printer)` 可请求该设备授权。USB 打印仍需要业务侧或后续插件版本实现 Android file descriptor 打印通道。
 - Linux：没有 App manifest 权限；网络发现/网络打印通常不需要应用级权限，但防火墙可能影响 mDNS UDP 5353。普通用户访问 USB 设备通常需要 udev 规则或加入对应设备组，否则 libusb 可能只能用 `sudo` 访问。
-- Windows：普通 Flutter Win32 App 没有类似 macOS 的网络 entitlement；网络发现/网络打印通常不需要 manifest 能力，但防火墙可能影响 mDNS UDP 5353。USB 直连依赖设备绑定 WinUSB/libusb 兼容驱动。如果打印机使用厂商专用驱动或系统打印队列，libusb 扫描/直连可能不可用。
+- Windows：普通 Flutter Win32 App 没有类似 macOS 的网络 entitlement；网络发现/网络打印通常不需要 manifest 能力，但防火墙可能影响 mDNS UDP 5353。USB 打印通过 Windows 标准 `usbprint.sys` 设备接口写入原始 ESC/POS/TSPL 字节，适合系统识别为 USB printer class 的小票机/标签机。
 
 网络模式如果报 `Operation not permitted (os error 1)`，通常是宿主应用被系统策略拒绝创建 TCP socket；macOS 优先检查当前运行的 `.app` 是否实际签入了 `com.apple.security.network.client`，Android 优先检查最终合并后的 Manifest 是否仍包含 `android.permission.INTERNET`。
 

@@ -1,27 +1,41 @@
-use base64::Engine as _;
-use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
-use encoding_rs::GBK;
-use escpos::driver::{Driver, SerialPortDriver, UsbDriver};
+//! 小票渲染流水线：模板分发、连接管理和 ESC/POS 字节生成。
+//!
+//! 根据模板和数据选择正确的打印路径：
+//! - **TSPL-image**：先渲染成位图，再封装成 `BITMAP` 指令
+//! - **TSPL**：直接生成原生 TSPL 指令流
+//! - **Image/bitmap encoding**：把文本合成图片，适合阿拉伯语、维吾尔语等复杂文字
+//! - **default**：使用原生 ESC/POS 文本指令
+//!
+//! 连接包装器（`AnyDriver`、`TcpDriver`、`VecDriver`、`CountingDriver`）
+//! 抹平 TCP/USB/串口差异，让模板渲染流程不用直接关心底层 I/O。
+
+#[cfg(not(target_os = "windows"))]
+use escpos::driver::UsbDriver;
+use escpos::driver::{Driver, SerialPortDriver};
 use escpos::errors::PrinterError as EscposError;
 use escpos::printer::Printer;
 use escpos::utils::*;
 use handlebars::{no_escape, Handlebars};
-use image::{GrayImage, Luma};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-use mdns_sd::{ServiceDaemon, ServiceEvent};
-use qrcode::QrCode;
-use rusb::UsbContext;
-use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use thiserror::Error;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use std::time::Duration;
 
 use crate::api::printer::PrinterConnection;
+use crate::discovery::{discover_network_printers_inner, list_usb_printers_inner};
+use crate::error::PrinterError;
+use crate::protocol::tspl;
+use crate::render::encoding::{encode_printer_text, normalize_text_for_encoding};
+use crate::render::image::{
+    decode_image_base64, image_bit_option, image_bytes_bit_option, render_template_as_image,
+};
+use crate::render::text_layout::{format_columns, format_row, repeat_to_width};
+use crate::render::value::{hex_decode, render_value, value_ref};
+use crate::template::{parse_template, BarcodeKind, Element, Template, TextSize};
+use crate::util::{has_cut_element, into_response, justify_mode};
+#[cfg(target_os = "windows")]
+use crate::windows_usbprint::WindowsUsbPrintDriver;
 
 // ---- 自定义 VecDriver：捕获打印字节，不做网络发送 ----
 
@@ -98,7 +112,10 @@ impl<D: Driver> Driver for CountingDriver<D> {
 
 enum AnyDriver {
     Tcp(TcpDriver),
+    #[cfg(not(target_os = "windows"))]
     Usb(UsbDriver),
+    #[cfg(target_os = "windows")]
+    WindowsUsbPrint(WindowsUsbPrintDriver),
     Serial(SerialPortDriver),
 }
 
@@ -106,254 +123,44 @@ impl Driver for AnyDriver {
     fn name(&self) -> String {
         match self {
             AnyDriver::Tcp(d) => d.name(),
+            #[cfg(not(target_os = "windows"))]
             AnyDriver::Usb(d) => d.name(),
+            #[cfg(target_os = "windows")]
+            AnyDriver::WindowsUsbPrint(d) => d.name(),
             AnyDriver::Serial(d) => d.name(),
         }
     }
     fn write(&self, data: &[u8]) -> std::result::Result<(), EscposError> {
         match self {
             AnyDriver::Tcp(d) => d.write(data),
+            #[cfg(not(target_os = "windows"))]
             AnyDriver::Usb(d) => d.write(data),
+            #[cfg(target_os = "windows")]
+            AnyDriver::WindowsUsbPrint(d) => d.write(data),
             AnyDriver::Serial(d) => d.write(data),
         }
     }
     fn read(&self, buf: &mut [u8]) -> std::result::Result<usize, EscposError> {
         match self {
             AnyDriver::Tcp(d) => d.read(buf),
+            #[cfg(not(target_os = "windows"))]
             AnyDriver::Usb(d) => d.read(buf),
+            #[cfg(target_os = "windows")]
+            AnyDriver::WindowsUsbPrint(d) => d.read(buf),
             AnyDriver::Serial(d) => d.read(buf),
         }
     }
     fn flush(&self) -> std::result::Result<(), EscposError> {
         match self {
             AnyDriver::Tcp(d) => d.flush(),
+            #[cfg(not(target_os = "windows"))]
             AnyDriver::Usb(d) => d.flush(),
+            #[cfg(target_os = "windows")]
+            AnyDriver::WindowsUsbPrint(d) => d.flush(),
             AnyDriver::Serial(d) => d.flush(),
         }
     }
 }
-
-// ---- 错误类型 ----
-
-#[derive(Debug, Error)]
-pub enum PrinterError {
-    #[error("模板 JSON 解析失败: {0}")]
-    InvalidTemplate(String),
-    #[error("数据 JSON 解析失败: {0}")]
-    InvalidData(String),
-    #[error("Handlebars 渲染失败: {0}")]
-    Render(String),
-    #[error("文本编码失败: {0}")]
-    Encode(String),
-    #[error("图片渲染失败: {0}")]
-    ImageRender(String),
-    #[error("图片数据无效: {0}")]
-    InvalidImageData(String),
-    #[error("标签指令渲染失败: {0}")]
-    LabelRender(String),
-    #[error("原始 hex 指令解析失败: {0}")]
-    InvalidRawHex(String),
-    #[error("网络发现失败: {0}")]
-    Discovery(String),
-    #[error("ESC/POS 驱动错误: {0}")]
-    Escpos(String),
-    #[error("连接打印机失败: {0}")]
-    Connect(String),
-}
-
-impl From<EscposError> for PrinterError {
-    fn from(e: EscposError) -> Self {
-        PrinterError::Escpos(e.to_string())
-    }
-}
-
-// ---- 模板结构 ----
-
-#[derive(Debug, Deserialize)]
-struct Template {
-    #[serde(default = "default_width")]
-    width: usize,
-    #[serde(default = "default_encoding")]
-    encoding: String,
-    #[serde(default, alias = "fontFamily")]
-    font_family: Option<String>,
-    #[serde(default, alias = "fontSize")]
-    font_size: Option<f32>,
-    #[serde(default, alias = "labelWidthMm")]
-    label_width_mm: Option<f32>,
-    #[serde(default, alias = "labelHeightMm")]
-    label_height_mm: Option<f32>,
-    #[serde(default, alias = "labelGapMm")]
-    label_gap_mm: Option<f32>,
-    #[serde(default, alias = "labelDensity")]
-    label_density: Option<u8>,
-    #[serde(default, alias = "labelSpeed")]
-    label_speed: Option<u8>,
-    #[serde(default, alias = "labelHomeBeforePrint")]
-    label_home_before_print: Option<bool>,
-    #[serde(default, alias = "labelReferenceX")]
-    label_reference_x: Option<i32>,
-    #[serde(default, alias = "labelReferenceY")]
-    label_reference_y: Option<i32>,
-    #[serde(default, alias = "labelShiftDots")]
-    label_shift_dots: Option<i32>,
-    #[serde(default)]
-    elements: Vec<Element>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum Element {
-    #[serde(rename = "text")]
-    Text {
-        value: String,
-        #[serde(default)]
-        align: Align,
-        #[serde(default)]
-        bold: bool,
-        #[serde(default)]
-        size: TextSize,
-    },
-    #[serde(rename = "row")]
-    Row {
-        left: String,
-        right: String,
-        #[serde(default)]
-        bold: bool,
-    },
-    #[serde(rename = "columns")]
-    Columns { columns: Vec<Column> },
-    #[serde(rename = "divider")]
-    Divider {
-        #[serde(default = "default_divider_char")]
-        ch: String,
-    },
-    #[serde(rename = "feed")]
-    Feed {
-        #[serde(default = "default_feed_lines")]
-        lines: u8,
-    },
-    #[serde(rename = "cut")]
-    Cut,
-    #[serde(rename = "repeat")]
-    Repeat {
-        path: String,
-        elements: Vec<Element>,
-    },
-    #[serde(rename = "raw")]
-    Raw { hex: String },
-    #[serde(rename = "qrcode")]
-    QrCode {
-        value: String,
-        #[serde(default = "default_qrcode_size")]
-        size: u8,
-        #[serde(default)]
-        align: Align,
-        #[serde(default)]
-        x: Option<i32>,
-        #[serde(default)]
-        y: Option<i32>,
-    },
-    #[serde(rename = "barcode")]
-    Barcode {
-        value: String,
-        #[serde(default)]
-        system: BarcodeKind,
-        #[serde(default)]
-        align: Align,
-    },
-    #[serde(rename = "image")]
-    Image {
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        base64: Option<String>,
-        #[serde(default = "default_image_max_width")]
-        max_width: u32,
-        #[serde(default)]
-        max_height: Option<u32>,
-        #[serde(default)]
-        align: Align,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-struct Column {
-    value: String,
-    #[serde(default = "default_column_width")]
-    width: usize,
-    #[serde(default)]
-    align: Align,
-    #[serde(default)]
-    bold: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Align {
-    #[default]
-    Left,
-    Center,
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum TextSize {
-    #[default]
-    Normal,
-    Double,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum BarcodeKind {
-    #[default]
-    Ean13,
-    Ean8,
-    Code39,
-    Codabar,
-    Itf,
-    Upca,
-    Upce,
-}
-
-fn default_width() -> usize {
-    48
-}
-fn default_encoding() -> String {
-    "gbk".into()
-}
-fn default_divider_char() -> String {
-    "-".into()
-}
-fn default_feed_lines() -> u8 {
-    3
-}
-fn default_column_width() -> usize {
-    12
-}
-fn default_qrcode_size() -> u8 {
-    5
-}
-fn default_image_max_width() -> u32 {
-    192
-}
-
-const DEFAULT_DISCOVERY_TIMEOUT_MS: u64 = 3_000;
-const MIN_DISCOVERY_TIMEOUT_MS: u64 = 250;
-const MAX_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
-const MDNS_RECV_SLICE_MS: u64 = 50;
-const TSPL_DOTS_PER_MM: f32 = 8.0;
-const TSPL_MARGIN_X: i32 = 24;
-const TSPL_MARGIN_Y: i32 = 24;
-const TSPL_TEXT_LINE_HEIGHT: i32 = 34;
-const DEFAULT_NETWORK_PRINTER_SERVICE_TYPES: &[&str] = &[
-    "_pdl-datastream._tcp.local.",
-    "_printer._tcp.local.",
-    "_ipp._tcp.local.",
-    "_ipps._tcp.local.",
-];
 
 // ---- 公开入口 ----
 
@@ -387,8 +194,8 @@ fn print_receipt_inner(
     let template = parse_template(template_json)?;
     let data: Value =
         serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
-    if is_tspl_image_template(&template) {
-        let bytes = render_template_as_tspl_image_bytes(&template, &data)?;
+    if tspl::is_tspl_image_template(&template) {
+        let bytes = tspl::render_template_as_tspl_image_bytes(&template, &data)?;
         let (driver, written) = CountingDriver::new(open_driver(connection)?);
         driver.write(&bytes)?;
         driver.flush()?;
@@ -396,8 +203,8 @@ fn print_receipt_inner(
         return Ok(json!({ "printed": true, "bytes": bytes }));
     }
 
-    if is_tspl_template(&template) {
-        let bytes = render_template_as_tspl_bytes(&template, &data)?;
+    if tspl::is_tspl_template(&template) {
+        let bytes = tspl::render_template_as_tspl_bytes(&template, &data)?;
         let (driver, written) = CountingDriver::new(open_driver(connection)?);
         driver.write(&bytes)?;
         driver.flush()?;
@@ -416,13 +223,13 @@ fn render_receipt_inner(template_json: &str, data_json: &str) -> Result<Value, P
     let template = parse_template(template_json)?;
     let data: Value =
         serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
-    if is_tspl_image_template(&template) {
-        let bytes = render_template_as_tspl_image_bytes(&template, &data)?;
+    if tspl::is_tspl_image_template(&template) {
+        let bytes = tspl::render_template_as_tspl_image_bytes(&template, &data)?;
         return Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }));
     }
 
-    if is_tspl_template(&template) {
-        let bytes = render_template_as_tspl_bytes(&template, &data)?;
+    if tspl::is_tspl_template(&template) {
+        let bytes = tspl::render_template_as_tspl_bytes(&template, &data)?;
         return Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }));
     }
 
@@ -431,64 +238,6 @@ fn render_receipt_inner(template_json: &str, data_json: &str) -> Result<Value, P
     printer.print()?;
     let bytes = buf.lock().unwrap().clone();
     Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }))
-}
-
-fn parse_template(template_json: &str) -> Result<Template, PrinterError> {
-    let mut value: Value = serde_json::from_str(template_json)
-        .map_err(|e| PrinterError::InvalidTemplate(e.to_string()))?;
-    normalize_template_paper_size(&mut value)?;
-    serde_json::from_value(value).map_err(|e| PrinterError::InvalidTemplate(e.to_string()))
-}
-
-fn normalize_template_paper_size(value: &mut Value) -> Result<(), PrinterError> {
-    let Value::Object(template) = value else {
-        return Ok(());
-    };
-
-    if template.contains_key("width") {
-        return Ok(());
-    }
-
-    let Some(paper_size) = template
-        .get("paperSize")
-        .or_else(|| template.get("paper_size"))
-        .cloned()
-    else {
-        return Ok(());
-    };
-
-    let width = match paper_size {
-        Value::Number(number) if number.as_u64() == Some(58) => 32,
-        Value::Number(number) if number.as_u64() == Some(80) => 48,
-        Value::String(value) => match normalize_paper_size_label(&value).as_str() {
-            "58" => 32,
-            "80" => 48,
-            _ => {
-                return Err(PrinterError::InvalidTemplate(format!(
-                    "不支持的 paperSize: {value}"
-                )));
-            }
-        },
-        other => {
-            return Err(PrinterError::InvalidTemplate(format!(
-                "paperSize 必须是 58、80、58mm 或 80mm，当前为 {other}"
-            )));
-        }
-    };
-
-    template.insert("width".to_string(), json!(width));
-    Ok(())
-}
-
-fn normalize_paper_size_label(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace([' ', '-', '_'], "")
-        .replace("毫米", "mm")
-        .replace("小票", "")
-        .trim_end_matches("mm")
-        .to_string()
 }
 
 fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError> {
@@ -506,9 +255,19 @@ fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError
             vendor_id,
             product_id,
         } => {
-            let driver = UsbDriver::open(*vendor_id, *product_id, None, None)
-                .map_err(|e| PrinterError::Connect(e.to_string()))?;
-            Ok(AnyDriver::Usb(driver))
+            #[cfg(target_os = "windows")]
+            {
+                let driver = WindowsUsbPrintDriver::open_by_vid_pid(*vendor_id, *product_id)
+                    .map_err(|e| PrinterError::Connect(e.to_string()))?;
+                Ok(AnyDriver::WindowsUsbPrint(driver))
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let driver = UsbDriver::open(*vendor_id, *product_id, None, None)
+                    .map_err(|e| PrinterError::Connect(e.to_string()))?;
+                Ok(AnyDriver::Usb(driver))
+            }
         }
         PrinterConnection::Serial { port, baud_rate } => {
             let timeout = Some(Duration::from_secs(5));
@@ -517,314 +276,6 @@ fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError
             Ok(AnyDriver::Serial(driver))
         }
     }
-}
-
-fn list_usb_printers_inner() -> Result<Value, PrinterError> {
-    let context = rusb::Context::new().map_err(|e| PrinterError::Connect(e.to_string()))?;
-    let devices = context
-        .devices()
-        .map_err(|e| PrinterError::Connect(e.to_string()))?;
-    let mut result = Vec::new();
-
-    for device in devices.iter() {
-        let descriptor = match device.device_descriptor() {
-            Ok(descriptor) => descriptor,
-            Err(_) => continue,
-        };
-        let handle = device.open().ok();
-        let product = handle
-            .as_ref()
-            .and_then(|handle| handle.read_product_string_ascii(&descriptor).ok());
-        let manufacturer = handle
-            .as_ref()
-            .and_then(|handle| handle.read_manufacturer_string_ascii(&descriptor).ok());
-        let serial = handle
-            .as_ref()
-            .and_then(|handle| handle.read_serial_number_string_ascii(&descriptor).ok());
-        let class_code = descriptor.class_code();
-        let interface_classes = usb_interface_classes(&device);
-        let is_printer = class_code == 0x07 || interface_classes.contains(&0x07);
-
-        result.push(json!({
-            "vendorId": descriptor.vendor_id(),
-            "productId": descriptor.product_id(),
-            "vendorIdHex": format!("0x{:04X}", descriptor.vendor_id()),
-            "productIdHex": format!("0x{:04X}", descriptor.product_id()),
-            "manufacturer": manufacturer,
-            "product": product,
-            "serial": serial,
-            "classCode": class_code,
-            "interfaceClasses": interface_classes,
-            "isPrinter": is_printer,
-        }));
-    }
-
-    result.sort_by_key(|value| {
-        (
-            !value["isPrinter"].as_bool().unwrap_or(false),
-            value["manufacturer"].as_str().unwrap_or("").to_owned(),
-            value["product"].as_str().unwrap_or("").to_owned(),
-        )
-    });
-
-    Ok(json!({ "printers": result }))
-}
-
-fn usb_interface_classes<T: UsbContext>(device: &rusb::Device<T>) -> Vec<u8> {
-    let descriptor = match device.device_descriptor() {
-        Ok(descriptor) => descriptor,
-        Err(_) => return Vec::new(),
-    };
-    let mut classes = Vec::new();
-    for config_index in 0..descriptor.num_configurations() {
-        let config = match device.config_descriptor(config_index) {
-            Ok(config) => config,
-            Err(_) => continue,
-        };
-        for interface in config.interfaces() {
-            for descriptor in interface.descriptors() {
-                let class_code = descriptor.class_code();
-                if !classes.contains(&class_code) {
-                    classes.push(class_code);
-                }
-            }
-        }
-    }
-    classes
-}
-
-#[derive(Debug, Clone)]
-struct NetworkPrinterCandidate {
-    service_name: String,
-    service_type: String,
-    fullname: String,
-    hostname: String,
-    host: String,
-    port: u16,
-    addresses: Vec<String>,
-    txt: HashMap<String, String>,
-    supports_raw_tcp: bool,
-}
-
-impl NetworkPrinterCandidate {
-    fn to_json(&self) -> Value {
-        json!({
-            "serviceName": self.service_name,
-            "serviceType": self.service_type,
-            "fullname": self.fullname,
-            "hostname": self.hostname,
-            "host": self.host,
-            "port": self.port,
-            "addresses": self.addresses,
-            "txt": self.txt,
-            "supportsRawTcp": self.supports_raw_tcp,
-        })
-    }
-}
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
-fn discover_network_printers_inner(
-    _timeout_ms: u64,
-    _service_types: Vec<String>,
-) -> Result<Value, PrinterError> {
-    Err(PrinterError::Discovery(
-        "当前平台需要通过原生网络服务发现 API 和运行时权限适配 mDNS".into(),
-    ))
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn discover_network_printers_inner(
-    timeout_ms: u64,
-    service_types: Vec<String>,
-) -> Result<Value, PrinterError> {
-    let timeout_ms = normalize_discovery_timeout_ms(timeout_ms);
-    let service_types = normalize_discovery_service_types(service_types)?;
-    let started_at = Instant::now();
-    let deadline = started_at + Duration::from_millis(timeout_ms);
-    let mdns = ServiceDaemon::new().map_err(|e| PrinterError::Discovery(e.to_string()))?;
-    let mut receivers = Vec::new();
-
-    for service_type in &service_types {
-        let receiver = mdns
-            .browse(service_type)
-            .map_err(|e| PrinterError::Discovery(e.to_string()))?;
-        receivers.push((service_type.clone(), receiver));
-    }
-
-    let mut candidates = HashMap::<String, NetworkPrinterCandidate>::new();
-
-    'scan: while Instant::now() < deadline {
-        for (service_type, receiver) in &receivers {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break 'scan;
-            }
-            let wait = remaining.min(Duration::from_millis(MDNS_RECV_SLICE_MS));
-            match receiver.recv_timeout(wait) {
-                Ok(ServiceEvent::ServiceResolved(info)) => {
-                    if let Some(candidate) = network_candidate_from_mdns(service_type, &info) {
-                        let key = network_candidate_key(&candidate);
-                        candidates.insert(key, candidate);
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => {}
-            }
-        }
-    }
-
-    for service_type in &service_types {
-        let _ = mdns.stop_browse(service_type);
-    }
-    if let Ok(status) = mdns.shutdown() {
-        let _ = status.recv_timeout(Duration::from_millis(200));
-    }
-
-    let elapsed_ms = started_at.elapsed().as_millis() as u64;
-    let mut printers = candidates.into_values().collect::<Vec<_>>();
-    printers.sort_by(|a, b| {
-        a.service_name
-            .to_lowercase()
-            .cmp(&b.service_name.to_lowercase())
-            .then_with(|| a.host.cmp(&b.host))
-            .then_with(|| a.port.cmp(&b.port))
-    });
-
-    Ok(json!({
-        "timeoutMs": timeout_ms,
-        "durationMs": elapsed_ms,
-        "timedOut": elapsed_ms >= timeout_ms,
-        "serviceTypes": service_types,
-        "printers": printers.into_iter().map(|printer| printer.to_json()).collect::<Vec<_>>(),
-    }))
-}
-
-fn normalize_discovery_timeout_ms(timeout_ms: u64) -> u64 {
-    let timeout_ms = if timeout_ms == 0 {
-        DEFAULT_DISCOVERY_TIMEOUT_MS
-    } else {
-        timeout_ms
-    };
-    timeout_ms.clamp(MIN_DISCOVERY_TIMEOUT_MS, MAX_DISCOVERY_TIMEOUT_MS)
-}
-
-fn normalize_discovery_service_types(
-    service_types: Vec<String>,
-) -> Result<Vec<String>, PrinterError> {
-    let source = if service_types.is_empty() {
-        DEFAULT_NETWORK_PRINTER_SERVICE_TYPES
-            .iter()
-            .map(|value| value.to_string())
-            .collect()
-    } else {
-        service_types
-    };
-    let mut normalized = Vec::new();
-    for service_type in source {
-        let service_type = normalize_mdns_service_type(&service_type)?;
-        if !normalized.contains(&service_type) {
-            normalized.push(service_type);
-        }
-    }
-    Ok(normalized)
-}
-
-fn normalize_mdns_service_type(service_type: &str) -> Result<String, PrinterError> {
-    let mut value = service_type
-        .trim()
-        .to_ascii_lowercase()
-        .trim_end_matches('.')
-        .to_string();
-    if value.is_empty() {
-        return Err(PrinterError::Discovery("mDNS 服务类型不能为空".into()));
-    }
-    if value.ends_with(".local") {
-        value.truncate(value.len() - ".local".len());
-    }
-    if !value.starts_with('_') {
-        value.insert(0, '_');
-    }
-    if !value.contains("._tcp") && !value.contains("._udp") {
-        if value.contains('.') {
-            return Err(PrinterError::Discovery(format!(
-                "mDNS 服务类型缺少 _tcp 或 _udp 协议段: {service_type}"
-            )));
-        }
-        value.push_str("._tcp");
-    }
-    value.push_str(".local.");
-    if !(value.ends_with("._tcp.local.") || value.ends_with("._udp.local.")) {
-        return Err(PrinterError::Discovery(format!(
-            "mDNS 服务类型必须以 ._tcp.local. 或 ._udp.local. 结尾: {service_type}"
-        )));
-    }
-    Ok(value)
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn network_candidate_from_mdns(
-    fallback_service_type: &str,
-    info: &mdns_sd::ResolvedService,
-) -> Option<NetworkPrinterCandidate> {
-    let mut addresses = info
-        .get_addresses()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    addresses.sort();
-    let host = info
-        .get_addresses_v4()
-        .into_iter()
-        .map(|addr| addr.to_string())
-        .min()
-        .or_else(|| addresses.first().cloned())
-        .unwrap_or_else(|| info.get_hostname().trim_end_matches('.').to_string());
-    if host.is_empty() {
-        return None;
-    }
-    let service_type = if info.ty_domain.is_empty() {
-        fallback_service_type.to_string()
-    } else {
-        info.ty_domain.clone()
-    };
-    let txt = info
-        .get_properties()
-        .iter()
-        .map(|property| (property.key().to_string(), property.val_str().to_string()))
-        .collect::<HashMap<_, _>>();
-    Some(NetworkPrinterCandidate {
-        service_name: mdns_instance_name(info.get_fullname(), &service_type),
-        service_type: service_type.clone(),
-        fullname: info.get_fullname().to_string(),
-        hostname: info.get_hostname().trim_end_matches('.').to_string(),
-        host,
-        port: info.get_port(),
-        addresses,
-        txt,
-        supports_raw_tcp: supports_raw_tcp_service(&service_type, info.get_port()),
-    })
-}
-
-fn network_candidate_key(candidate: &NetworkPrinterCandidate) -> String {
-    if candidate.host.is_empty() {
-        format!("{}:{}", candidate.fullname, candidate.port)
-    } else {
-        format!("{}:{}", candidate.host, candidate.port)
-    }
-}
-
-fn mdns_instance_name(fullname: &str, service_type: &str) -> String {
-    fullname
-        .strip_suffix(service_type)
-        .unwrap_or(fullname)
-        .trim_end_matches('.')
-        .replace("\\.", ".")
-        .replace("\\\\", "\\")
-}
-
-fn supports_raw_tcp_service(service_type: &str, port: u16) -> bool {
-    let service_type = service_type.to_ascii_lowercase();
-    service_type.contains("_pdl-datastream._tcp") || port == 9100
 }
 
 // ---- TcpDriver ----
@@ -879,116 +330,6 @@ impl Driver for TcpDriver {
     }
 }
 
-// ---- TSPL label renderer ----
-
-struct TsplRenderState {
-    commands: Vec<String>,
-    y: i32,
-    label_width_dots: i32,
-}
-
-impl TsplRenderState {
-    fn new(template: &Template) -> Self {
-        let width_mm = tspl_label_width_mm(template);
-        Self {
-            commands: tspl_setup_commands(template),
-            y: TSPL_MARGIN_Y,
-            label_width_dots: (width_mm * TSPL_DOTS_PER_MM).round() as i32,
-        }
-    }
-
-    fn push_text(&mut self, text: &str, align: Align, bold: bool, size: TextSize) {
-        let text = text.trim();
-        if text.is_empty() {
-            return;
-        }
-
-        let scale = if matches!(size, TextSize::Double) {
-            2
-        } else {
-            1
-        };
-        let line_height = TSPL_TEXT_LINE_HEIGHT * scale;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                self.y += line_height;
-                continue;
-            }
-            let estimated_width = estimate_tspl_text_width(line, scale);
-            let x = match align {
-                Align::Left => TSPL_MARGIN_X,
-                Align::Center => ((self.label_width_dots - estimated_width) / 2).max(0),
-                Align::Right => (self.label_width_dots - TSPL_MARGIN_X - estimated_width).max(0),
-            };
-            self.commands.push(format!(
-                "TEXT {},{},\"TSS24.BF2\",0,{},{},\"{}\"",
-                x,
-                self.y,
-                scale,
-                if bold { scale + 1 } else { scale },
-                escape_tspl_text(line)
-            ));
-            self.y += line_height;
-        }
-    }
-
-    fn push_bar(&mut self) {
-        let width = (self.label_width_dots - TSPL_MARGIN_X * 2).max(8);
-        self.commands
-            .push(format!("BAR {},{},{},2", TSPL_MARGIN_X, self.y, width));
-        self.y += 12;
-    }
-
-    fn push_qrcode(&mut self, value: &str, size: u8, align: Align, x: Option<i32>, y: Option<i32>) {
-        let value = value.trim();
-        if value.is_empty() {
-            return;
-        }
-
-        let qr_size = i32::from(size.clamp(1, 10)) * 28;
-        let x = x.unwrap_or_else(|| match align {
-            Align::Left => TSPL_MARGIN_X,
-            Align::Center => ((self.label_width_dots - qr_size) / 2).max(0),
-            Align::Right => (self.label_width_dots - TSPL_MARGIN_X - qr_size).max(0),
-        });
-        let y = y.unwrap_or(self.y);
-        self.commands.push(format!(
-            "QRCODE {},{},L,{},A,0,\"{}\"",
-            x,
-            y,
-            size.clamp(1, 10),
-            escape_tspl_text(value)
-        ));
-        if y == self.y {
-            self.y += qr_size + 12;
-        }
-    }
-
-    fn push_barcode(&mut self, value: &str, system: BarcodeKind, align: Align) {
-        let value = value.trim();
-        if value.is_empty() {
-            return;
-        }
-
-        let barcode_type = tspl_barcode_type(system);
-        let estimated_width = (value.chars().count() as i32 * 16).max(120);
-        let x = match align {
-            Align::Left => TSPL_MARGIN_X,
-            Align::Center => ((self.label_width_dots - estimated_width) / 2).max(0),
-            Align::Right => (self.label_width_dots - TSPL_MARGIN_X - estimated_width).max(0),
-        };
-        self.commands.push(format!(
-            "BARCODE {},{},\"{}\",64,1,0,2,2,\"{}\"",
-            x,
-            self.y,
-            barcode_type,
-            escape_tspl_text(value)
-        ));
-        self.y += 92;
-    }
-}
-
 // ---- 模板 → Printer builder 转换 ----
 
 fn build_printer<D: Driver>(
@@ -1000,6 +341,8 @@ fn build_printer<D: Driver>(
     handlebars.register_escape_fn(no_escape);
     let mut printer = Printer::new(driver, Protocol::default(), None);
     printer.init()?;
+    // 0x1c 0x26 是部分中文热敏机需要的 ESC/POS 复位序列；
+    // 避免设备残留在页模式等异常状态，导致后续文本不按标准模式输出。
     printer.custom(&[0x1c, 0x26])?;
 
     if template.encoding.eq_ignore_ascii_case("image")
@@ -1023,623 +366,6 @@ fn build_printer<D: Driver>(
     }
 
     Ok(printer)
-}
-
-fn is_tspl_template(template: &Template) -> bool {
-    let normalized = template
-        .encoding
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', '_'], "");
-    matches!(normalized.as_str(), "tspl" | "tsc")
-}
-
-fn is_tspl_image_template(template: &Template) -> bool {
-    let normalized = template
-        .encoding
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', '_'], "");
-    matches!(
-        normalized.as_str(),
-        "tsplimage" | "tsplbitmap" | "tscimage" | "tscbitmap"
-    )
-}
-
-fn tspl_setup_commands(template: &Template) -> Vec<String> {
-    let reference_x = template.label_reference_x.unwrap_or(0);
-    let reference_y = template.label_reference_y.unwrap_or(0);
-    let mut commands = vec![
-        format!(
-            "SIZE {} mm,{} mm",
-            format_tspl_mm(tspl_label_width_mm(template)),
-            format_tspl_mm(template.label_height_mm.unwrap_or(40.0))
-        ),
-        format!(
-            "GAP {} mm,0 mm",
-            format_tspl_mm(template.label_gap_mm.unwrap_or(2.0))
-        ),
-        format!(
-            "DENSITY {}",
-            template.label_density.unwrap_or(8).clamp(0, 15)
-        ),
-        format!("SPEED {}", template.label_speed.unwrap_or(4).clamp(1, 6)),
-        "DIRECTION 1".to_string(),
-        format!("REFERENCE {reference_x},{reference_y}"),
-    ];
-    if let Some(shift) = template.label_shift_dots.filter(|value| *value != 0) {
-        commands.push(format!("SHIFT {}", shift.clamp(-203, 203)));
-    }
-    if template.label_home_before_print.unwrap_or(false) {
-        commands.push("HOME".to_string());
-    }
-    commands.push("CLS".to_string());
-    commands
-}
-
-fn render_template_as_tspl_bytes(
-    template: &Template,
-    data: &Value,
-) -> Result<Vec<u8>, PrinterError> {
-    let mut handlebars = Handlebars::new();
-    handlebars.register_escape_fn(no_escape);
-    let mut state = TsplRenderState::new(template);
-
-    for element in &template.elements {
-        render_tspl_element(&mut state, element, data, &handlebars, template.width)?;
-    }
-
-    state.commands.push("PRINT 1,1".to_string());
-    let script = format!("{}\r\n", state.commands.join("\r\n"));
-    encode_printer_text(&script, "gbk")
-}
-
-fn render_template_as_tspl_image_bytes(
-    template: &Template,
-    data: &Value,
-) -> Result<Vec<u8>, PrinterError> {
-    let mut handlebars = Handlebars::new();
-    handlebars.register_escape_fn(no_escape);
-    let image = render_template_to_label_image(template, data, &handlebars)?;
-    let bitmap = pack_tspl_bitmap(&image);
-    let width_bytes = image.width().div_ceil(8);
-
-    let mut bytes = encode_printer_text(
-        &format!("{}\r\n", tspl_setup_commands(template).join("\r\n")),
-        "gbk",
-    )?;
-    bytes.extend_from_slice(format!("BITMAP 0,0,{},{},0,", width_bytes, image.height()).as_bytes());
-    bytes.extend_from_slice(&bitmap);
-    bytes.extend_from_slice(b"\r\nPRINT 1,1\r\n");
-    Ok(bytes)
-}
-
-fn render_template_to_label_image(
-    template: &Template,
-    data: &Value,
-    handlebars: &Handlebars,
-) -> Result<GrayImage, PrinterError> {
-    let width = (tspl_label_width_mm(template) * TSPL_DOTS_PER_MM).round() as u32;
-    let height = (template.label_height_mm.unwrap_or(40.0) * TSPL_DOTS_PER_MM).round() as u32;
-    let mut image = GrayImage::from_pixel(width.max(8), height.max(8), Luma([255]));
-    let mut y = TSPL_MARGIN_Y;
-    render_tspl_image_elements(
-        &mut image,
-        &mut y,
-        &template.elements,
-        data,
-        handlebars,
-        template,
-    )?;
-    Ok(image)
-}
-
-fn render_tspl_image_elements(
-    image: &mut GrayImage,
-    y: &mut i32,
-    elements: &[Element],
-    data: &Value,
-    handlebars: &Handlebars,
-    template: &Template,
-) -> Result<(), PrinterError> {
-    for element in elements {
-        match element {
-            Element::Text {
-                value,
-                align,
-                bold,
-                size,
-            } => {
-                let text = render_value(handlebars, value, data)?;
-                let font_size = if matches!(size, TextSize::Double) {
-                    template.font_size.unwrap_or(44.0).max(28.0)
-                } else {
-                    template.font_size.unwrap_or(26.0)
-                };
-                let line_height = (font_size * 1.25).ceil() as i32;
-                for line in text.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        *y += line_height;
-                        continue;
-                    }
-                    draw_label_text(
-                        image,
-                        line,
-                        LabelTextSpec {
-                            x: TSPL_MARGIN_X,
-                            y: *y,
-                            width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
-                            font_size,
-                            align: *align,
-                            bold: *bold,
-                            font_family: template.font_family.as_deref(),
-                        },
-                    );
-                    *y += line_height;
-                }
-            }
-            Element::Row { left, right, bold } => {
-                let left = render_value(handlebars, left, data)?;
-                let right = render_value(handlebars, right, data)?;
-                let font_size = template.font_size.unwrap_or(24.0);
-                let line_height = (font_size * 1.35).ceil() as i32;
-                draw_label_text(
-                    image,
-                    &left,
-                    LabelTextSpec {
-                        x: TSPL_MARGIN_X,
-                        y: *y,
-                        width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
-                        font_size,
-                        align: Align::Left,
-                        bold: *bold,
-                        font_family: template.font_family.as_deref(),
-                    },
-                );
-                draw_label_text(
-                    image,
-                    &right,
-                    LabelTextSpec {
-                        x: TSPL_MARGIN_X,
-                        y: *y,
-                        width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
-                        font_size,
-                        align: Align::Right,
-                        bold: *bold,
-                        font_family: template.font_family.as_deref(),
-                    },
-                );
-                *y += line_height;
-            }
-            Element::Columns { columns } => {
-                let mut items = Vec::new();
-                let bold = columns.iter().any(|col| col.bold);
-                for col in columns {
-                    let value = render_value(handlebars, &col.value, data)?;
-                    items.push((value, col.width, col.align));
-                }
-                for line in format_columns(&items) {
-                    draw_label_text(
-                        image,
-                        &line,
-                        LabelTextSpec {
-                            x: TSPL_MARGIN_X,
-                            y: *y,
-                            width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
-                            font_size: template.font_size.unwrap_or(24.0),
-                            align: Align::Left,
-                            bold,
-                            font_family: template.font_family.as_deref(),
-                        },
-                    );
-                    *y += TSPL_TEXT_LINE_HEIGHT;
-                }
-            }
-            Element::Divider { .. } => {
-                draw_horizontal_bar(image, TSPL_MARGIN_X, *y, 2);
-                *y += 12;
-            }
-            Element::Feed { lines } => {
-                *y += i32::from(*lines) * TSPL_TEXT_LINE_HEIGHT;
-            }
-            Element::Cut
-            | Element::Raw { .. }
-            | Element::Barcode { .. }
-            | Element::Image { .. } => {}
-            Element::Repeat { path, elements } => {
-                if let Some(Value::Array(items)) = value_ref(data, path) {
-                    for item in items {
-                        render_tspl_image_elements(image, y, elements, item, handlebars, template)?;
-                    }
-                }
-            }
-            Element::QrCode {
-                value,
-                size,
-                align,
-                x,
-                y: fixed_y,
-            } => {
-                let value = render_value(handlebars, value, data)?;
-                draw_qr_code_on_label(image, &value, *size, *align, *x, *fixed_y, y)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-struct LabelTextSpec<'a> {
-    x: i32,
-    y: i32,
-    width: u32,
-    font_size: f32,
-    align: Align,
-    bold: bool,
-    font_family: Option<&'a str>,
-}
-
-struct TextDrawSpec<'a> {
-    x: i32,
-    y: i32,
-    width: u32,
-    font_size: f32,
-    line_height: f32,
-    font_family: Option<&'a str>,
-}
-
-fn draw_label_text(image: &mut GrayImage, text: &str, spec: LabelTextSpec<'_>) {
-    let line_height = (spec.font_size * 1.35).ceil();
-    let estimated_width = estimate_bitmap_text_width(text, spec.font_size);
-    let draw_x = match spec.align {
-        Align::Left => spec.x,
-        Align::Center => spec.x + ((spec.width as i32 - estimated_width) / 2).max(0),
-        Align::Right => spec.x + (spec.width as i32 - estimated_width).max(0),
-    };
-    draw_text_at(
-        image,
-        text,
-        TextDrawSpec {
-            x: draw_x,
-            y: spec.y,
-            width: spec.width,
-            font_size: spec.font_size,
-            line_height,
-            font_family: spec.font_family,
-        },
-    );
-    if spec.bold {
-        draw_text_at(
-            image,
-            text,
-            TextDrawSpec {
-                x: draw_x + 1,
-                y: spec.y,
-                width: spec.width,
-                font_size: spec.font_size,
-                line_height,
-                font_family: spec.font_family,
-            },
-        );
-    }
-}
-
-fn draw_text_at(image: &mut GrayImage, text: &str, spec: TextDrawSpec<'_>) {
-    let mut font_system = FontSystem::new();
-    let mut swash_cache = SwashCache::new();
-    let metrics = Metrics::new(spec.font_size, spec.line_height);
-    let mut buffer = Buffer::new(&mut font_system, metrics);
-    buffer.set_size(
-        &mut font_system,
-        Some(spec.width as f32),
-        Some(spec.line_height * 2.0),
-    );
-    let mut attrs = Attrs::new();
-    if let Some(font_family) = spec
-        .font_family
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        attrs = attrs.family(Family::Name(font_family));
-    }
-    buffer.set_text(&mut font_system, text, &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(&mut font_system, false);
-    let image_width = image.width() as i32;
-    let image_height = image.height() as i32;
-    buffer.draw(
-        &mut font_system,
-        &mut swash_cache,
-        Color::rgb(0, 0, 0),
-        |glyph_x, glyph_y, w, h, color| {
-            let alpha = (color.0 >> 24) as u8;
-            if alpha == 0 {
-                return;
-            }
-            for dy in 0..h {
-                for dx in 0..w {
-                    let px = spec.x + glyph_x + dx as i32;
-                    let py = spec.y + glyph_y + dy as i32;
-                    if px < 0 || py < 0 || px >= image_width || py >= image_height {
-                        continue;
-                    }
-                    let current = image.get_pixel(px as u32, py as u32)[0];
-                    let blended = 255u16.saturating_sub(alpha as u16);
-                    image.put_pixel(px as u32, py as u32, Luma([current.min(blended as u8)]));
-                }
-            }
-        },
-    );
-}
-
-fn draw_horizontal_bar(image: &mut GrayImage, x: i32, y: i32, height: i32) {
-    let start_x = x.max(0) as u32;
-    let end_x = image.width().saturating_sub(x.max(0) as u32).max(start_x);
-    for py in y.max(0) as u32..(y + height).max(0) as u32 {
-        if py >= image.height() {
-            break;
-        }
-        for px in start_x..end_x {
-            image.put_pixel(px, py, Luma([0]));
-        }
-    }
-}
-
-fn draw_qr_code_on_label(
-    image: &mut GrayImage,
-    value: &str,
-    size: u8,
-    align: Align,
-    x: Option<i32>,
-    y: Option<i32>,
-    flow_y: &mut i32,
-) -> Result<(), PrinterError> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(());
-    }
-    let code =
-        QrCode::new(value.as_bytes()).map_err(|e| PrinterError::ImageRender(e.to_string()))?;
-    let scale = i32::from(size.clamp(1, 8));
-    let quiet_modules = 4i32;
-    let modules = code.width() as i32;
-    let qr_size = (modules + quiet_modules * 2) * scale;
-    let draw_x = x.unwrap_or_else(|| match align {
-        Align::Left => TSPL_MARGIN_X,
-        Align::Center => ((image.width() as i32 - qr_size) / 2).max(0),
-        Align::Right => (image.width() as i32 - TSPL_MARGIN_X - qr_size).max(0),
-    });
-    let draw_y = y.unwrap_or(*flow_y);
-    for module_y in 0..modules {
-        for module_x in 0..modules {
-            if code[(module_x as usize, module_y as usize)] != qrcode::types::Color::Dark {
-                continue;
-            }
-            let px = draw_x + (module_x + quiet_modules) * scale;
-            let py = draw_y + (module_y + quiet_modules) * scale;
-            fill_rect(image, px, py, scale, scale);
-        }
-    }
-    if y.is_none() {
-        *flow_y += qr_size + 12;
-    }
-    Ok(())
-}
-
-fn fill_rect(image: &mut GrayImage, x: i32, y: i32, width: i32, height: i32) {
-    for py in y.max(0)..(y + height).max(0) {
-        if py >= image.height() as i32 {
-            break;
-        }
-        for px in x.max(0)..(x + width).max(0) {
-            if px >= image.width() as i32 {
-                break;
-            }
-            image.put_pixel(px as u32, py as u32, Luma([0]));
-        }
-    }
-}
-
-fn pack_tspl_bitmap(image: &GrayImage) -> Vec<u8> {
-    let width_bytes = image.width().div_ceil(8);
-    let mut bytes = Vec::with_capacity((width_bytes * image.height()) as usize);
-    for y in 0..image.height() {
-        for byte_x in 0..width_bytes {
-            let mut byte = 0u8;
-            for bit in 0..8 {
-                let x = byte_x * 8 + bit;
-                if x < image.width() && image.get_pixel(x, y)[0] < 160 {
-                    byte |= 0x80 >> bit;
-                }
-            }
-            bytes.push(byte);
-        }
-    }
-    bytes
-}
-
-fn estimate_bitmap_text_width(value: &str, font_size: f32) -> i32 {
-    let units = value
-        .chars()
-        .map(|ch| if ch.is_ascii() { 0.56 } else { 1.0 })
-        .sum::<f32>();
-    (units * font_size).ceil() as i32
-}
-
-fn render_tspl_element(
-    state: &mut TsplRenderState,
-    element: &Element,
-    data: &Value,
-    handlebars: &Handlebars,
-    line_width: usize,
-) -> Result<(), PrinterError> {
-    match element {
-        Element::Text {
-            value,
-            align,
-            bold,
-            size,
-        } => {
-            let text = render_value(handlebars, value, data)?;
-            state.push_text(&text, *align, *bold, *size);
-        }
-        Element::Row { left, right, bold } => {
-            let l = render_value(handlebars, left, data)?;
-            let r = render_value(handlebars, right, data)?;
-            for line in format_row(&l, &r, line_width) {
-                state.push_text(&line, Align::Left, *bold, TextSize::Normal);
-            }
-        }
-        Element::Columns { columns } => {
-            let mut items = Vec::new();
-            let bold = columns.iter().any(|col| col.bold);
-            for col in columns {
-                let value = render_value(handlebars, &col.value, data)?;
-                items.push((value, col.width, col.align));
-            }
-            for line in format_columns(&items) {
-                state.push_text(&line, Align::Left, bold, TextSize::Normal);
-            }
-        }
-        Element::Divider { .. } => state.push_bar(),
-        Element::Feed { lines } => {
-            state.y += i32::from(*lines) * TSPL_TEXT_LINE_HEIGHT;
-        }
-        Element::Cut => {}
-        Element::Repeat { path, elements } => {
-            if let Some(Value::Array(items)) = value_ref(data, path) {
-                for item in items {
-                    for child in elements {
-                        render_tspl_element(state, child, item, handlebars, line_width)?;
-                    }
-                }
-            }
-        }
-        Element::Raw { hex } => {
-            let bytes = hex_decode(hex)?;
-            let command = String::from_utf8_lossy(&bytes).trim().to_string();
-            if !command.is_empty() {
-                state.commands.push(command);
-            }
-        }
-        Element::QrCode {
-            value,
-            size,
-            align,
-            x,
-            y,
-        } => {
-            let data = render_value(handlebars, value, data)?;
-            state.push_qrcode(&data, *size, *align, *x, *y);
-        }
-        Element::Barcode {
-            value,
-            system,
-            align,
-        } => {
-            let data = render_value(handlebars, value, data)?;
-            state.push_barcode(&data, *system, *align);
-        }
-        Element::Image { .. } => {
-            return Err(PrinterError::LabelRender(
-                "TSPL 标签模板暂不支持 image 元素，请改用文本、条码或二维码".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn tspl_label_width_mm(template: &Template) -> f32 {
-    template.label_width_mm.unwrap_or({
-        if template.width <= 40 {
-            58.0
-        } else {
-            template.width as f32
-        }
-    })
-}
-
-fn format_tspl_mm(value: f32) -> String {
-    if (value.fract()).abs() < f32::EPSILON {
-        format!("{}", value as i32)
-    } else {
-        format!("{value:.1}")
-    }
-}
-
-fn escape_tspl_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            '"' => '\'',
-            '\r' | '\n' | '\t' => ' ',
-            _ => ch,
-        })
-        .collect()
-}
-
-fn estimate_tspl_text_width(value: &str, scale: i32) -> i32 {
-    let width = value
-        .chars()
-        .map(|ch| if ch.is_ascii() { 12 } else { 24 })
-        .sum::<i32>();
-    width * scale.max(1)
-}
-
-fn tspl_barcode_type(system: BarcodeKind) -> &'static str {
-    match system {
-        BarcodeKind::Ean13 => "EAN13",
-        BarcodeKind::Ean8 => "EAN8",
-        BarcodeKind::Code39 => "39",
-        BarcodeKind::Codabar => "CODA",
-        BarcodeKind::Itf => "ITF",
-        BarcodeKind::Upca => "UPCA",
-        BarcodeKind::Upce => "UPCE",
-    }
-}
-
-fn render_template_as_image<D: Driver>(
-    printer: &mut Printer<D>,
-    template: &Template,
-    data: &Value,
-    handlebars: &Handlebars,
-) -> Result<(), PrinterError> {
-    let mut lines = Vec::new();
-    collect_image_lines(
-        &template.elements,
-        data,
-        handlebars,
-        template.width,
-        &mut lines,
-    )?;
-    let temp_image = TempImageFile::new(render_lines_to_image(&lines, template)?);
-    printer.justify(JustifyMode::CENTER)?;
-    printer.bit_image_option(
-        temp_image.path(),
-        image_bit_option(temp_image.path(), receipt_pixel_width(template.width), None)?,
-    )?;
-    printer.feed()?;
-    printer.justify(JustifyMode::LEFT)?;
-    Ok(())
-}
-
-struct TempImageFile {
-    path: String,
-}
-
-impl TempImageFile {
-    fn new(path: String) -> Self {
-        Self { path }
-    }
-
-    fn path(&self) -> &str {
-        &self.path
-    }
-}
-
-impl Drop for TempImageFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 fn render_element<D: Driver>(
@@ -1803,61 +529,6 @@ fn print_text_line<D: Driver>(
     Ok(())
 }
 
-fn collect_image_lines(
-    elements: &[Element],
-    data: &Value,
-    handlebars: &Handlebars,
-    line_width: usize,
-    lines: &mut Vec<String>,
-) -> Result<(), PrinterError> {
-    for element in elements {
-        match element {
-            Element::Text { value, .. } => {
-                let text = render_value(handlebars, value, data)?;
-                if text.is_empty() {
-                    continue;
-                }
-                lines.extend(text.lines().map(ToOwned::to_owned));
-            }
-            Element::Row { left, right, .. } => {
-                let left = render_value(handlebars, left, data)?;
-                let right = render_value(handlebars, right, data)?;
-                lines.extend(format_row(&left, &right, line_width));
-            }
-            Element::Columns { columns } => {
-                let mut items = Vec::new();
-                for col in columns {
-                    let value = render_value(handlebars, &col.value, data)?;
-                    items.push((value, col.width, col.align));
-                }
-                lines.extend(format_columns(&items));
-            }
-            Element::Divider { ch } => {
-                let token = ch.chars().next().unwrap_or('-');
-                lines.push(repeat_to_width(token, line_width));
-            }
-            Element::Feed { lines: count } => {
-                for _ in 0..*count {
-                    lines.push(String::new());
-                }
-            }
-            Element::Cut
-            | Element::Raw { .. }
-            | Element::QrCode { .. }
-            | Element::Barcode { .. } => {}
-            Element::Repeat { path, elements } => {
-                if let Some(Value::Array(items)) = value_ref(data, path) {
-                    for item in items {
-                        collect_image_lines(elements, item, handlebars, line_width, lines)?;
-                    }
-                }
-            }
-            Element::Image { .. } => {}
-        }
-    }
-    Ok(())
-}
-
 fn print_image_node<D: Driver>(
     printer: &mut Printer<D>,
     path: &Option<String>,
@@ -1893,318 +564,6 @@ fn print_image_node<D: Driver>(
     ))
 }
 
-fn render_lines_to_image(lines: &[String], template: &Template) -> Result<String, PrinterError> {
-    let text = lines.join("\n");
-    let width = receipt_pixel_width(template.width);
-    let font_size = template
-        .font_size
-        .unwrap_or(if width <= 384 { 24.0 } else { 26.0 })
-        .clamp(12.0, 72.0);
-    let line_height = (font_size * 1.35_f32).ceil();
-    let padding = 12u32;
-    let height = ((lines.len().max(1) as f32 * line_height).ceil() as u32) + padding * 2;
-    let mut image = GrayImage::from_pixel(width, height, Luma([255]));
-    let mut font_system = FontSystem::new();
-    let mut swash_cache = SwashCache::new();
-    let metrics = Metrics::new(font_size, line_height);
-    let mut buffer = Buffer::new(&mut font_system, metrics);
-
-    buffer.set_size(
-        &mut font_system,
-        Some((width - padding * 2) as f32),
-        Some(height as f32),
-    );
-    let mut attrs = Attrs::new();
-    if let Some(font_family) = template.font_family.as_deref().map(str::trim) {
-        if !font_family.is_empty() {
-            attrs = attrs.family(Family::Name(font_family));
-        }
-    }
-    buffer.set_text(&mut font_system, &text, &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(&mut font_system, false);
-    buffer.draw(
-        &mut font_system,
-        &mut swash_cache,
-        Color::rgb(0, 0, 0),
-        |x, y, w, h, color| {
-            let alpha = (color.0 >> 24) as u8;
-            if alpha == 0 {
-                return;
-            }
-            for dy in 0..h {
-                for dx in 0..w {
-                    let px = x + dx as i32 + padding as i32;
-                    let py = y + dy as i32 + padding as i32;
-                    if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                        continue;
-                    }
-                    let current = image.get_pixel(px as u32, py as u32)[0];
-                    let blended = 255u16.saturating_sub(alpha as u16);
-                    image.put_pixel(px as u32, py as u32, Luma([current.min(blended as u8)]));
-                }
-            }
-        },
-    );
-
-    let path = std::env::temp_dir().join(format!(
-        "kservice-printer-receipt-{}-{}.png",
-        std::process::id(),
-        unique_temp_suffix()
-    ));
-    image
-        .save(&path)
-        .map_err(|e| PrinterError::ImageRender(e.to_string()))?;
-    Ok(path.to_string_lossy().into_owned())
-}
-
-fn image_bit_option(
-    path: &str,
-    max_width: u32,
-    max_height: Option<u32>,
-) -> Result<BitImageOption, PrinterError> {
-    let (width, height) =
-        image::image_dimensions(path).map_err(|e| PrinterError::ImageRender(e.to_string()))?;
-    image_bit_option_for_dimensions(width, height, max_width, max_height)
-}
-
-fn image_bytes_bit_option(
-    bytes: &[u8],
-    max_width: u32,
-    max_height: Option<u32>,
-) -> Result<BitImageOption, PrinterError> {
-    let image =
-        image::load_from_memory(bytes).map_err(|e| PrinterError::ImageRender(e.to_string()))?;
-    image_bit_option_for_dimensions(image.width(), image.height(), max_width, max_height)
-}
-
-fn image_bit_option_for_dimensions(
-    width: u32,
-    height: u32,
-    max_width: u32,
-    max_height: Option<u32>,
-) -> Result<BitImageOption, PrinterError> {
-    let target_width = max_width.min(width).max(8);
-    let scaled_height = if width == 0 {
-        height
-    } else {
-        (height as u64 * target_width as u64).div_ceil(width as u64) as u32
-    };
-    let target_height = max_height.unwrap_or(scaled_height).max(8);
-    BitImageOption::new(
-        Some(round_up_to_multiple_of_8(target_width)),
-        Some(round_up_to_multiple_of_8(target_height)),
-        BitImageSize::Normal,
-    )
-    .map_err(PrinterError::from)
-}
-
-fn round_up_to_multiple_of_8(value: u32) -> u32 {
-    value.saturating_add(7) / 8 * 8
-}
-
-fn decode_image_base64(value: &str) -> Result<Vec<u8>, PrinterError> {
-    let payload = value
-        .split_once(',')
-        .map(|(_, payload)| payload)
-        .unwrap_or(value)
-        .trim();
-    base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|e| PrinterError::InvalidImageData(e.to_string()))
-}
-
-fn receipt_pixel_width(line_width: usize) -> u32 {
-    if line_width <= 32 {
-        384
-    } else {
-        576
-    }
-}
-
-fn unique_temp_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
-}
-
-fn encode_printer_text(text: &str, encoding: &str) -> Result<Vec<u8>, PrinterError> {
-    let normalized_encoding = encoding.trim().to_ascii_lowercase().replace('-', "");
-    if normalized_encoding == "utf8" {
-        return Ok(text.as_bytes().to_vec());
-    }
-
-    if matches!(normalized_encoding.as_str(), "gbk" | "gb2312" | "cp936") {
-        let normalized = normalize_text_for_encoding(text, encoding);
-        let (encoded, _, had_errors) = GBK.encode(&normalized);
-        if had_errors {
-            return Err(PrinterError::Encode("GBK 不支持部分字符".into()));
-        }
-        return Ok(encoded.into_owned());
-    }
-
-    Err(PrinterError::Encode(format!(
-        "不支持的文本编码: {encoding}"
-    )))
-}
-
-fn has_cut_element(elements: &[Element]) -> bool {
-    elements.iter().any(|element| match element {
-        Element::Cut => true,
-        Element::Repeat { elements, .. } => has_cut_element(elements),
-        _ => false,
-    })
-}
-
-fn format_row(left: &str, right: &str, line_width: usize) -> Vec<String> {
-    if line_width == 0 {
-        return vec![format!("{left}{right}")];
-    }
-
-    let left_width = display_width(left);
-    let right_width = display_width(right);
-    if left_width + right_width <= line_width {
-        return vec![format!(
-            "{left}{}{right}",
-            " ".repeat(line_width - left_width - right_width)
-        )];
-    }
-
-    if right_width < line_width {
-        let fitted_left = fit_text(left, line_width - right_width - 1, Align::Left);
-        return vec![format!("{fitted_left} {right}")];
-    }
-
-    vec![
-        fit_text(left, line_width, Align::Left),
-        fit_text(right, line_width, Align::Right),
-    ]
-}
-
-fn format_columns(columns: &[(String, usize, Align)]) -> Vec<String> {
-    if columns.is_empty() {
-        return Vec::new();
-    }
-
-    let wrapped = columns
-        .iter()
-        .map(|(value, width, _)| wrap_text_to_width(value, *width))
-        .collect::<Vec<_>>();
-    let row_count = wrapped.iter().map(Vec::len).max().unwrap_or(0);
-    let mut rows = Vec::new();
-
-    for row_index in 0..row_count {
-        let mut row = String::new();
-        for (column_index, (_, width, align)) in columns.iter().enumerate() {
-            let value = wrapped[column_index]
-                .get(row_index)
-                .map(String::as_str)
-                .unwrap_or("");
-            row.push_str(&fit_text(value, *width, *align));
-        }
-        if !row.trim().is_empty() {
-            rows.push(row);
-        }
-    }
-
-    rows
-}
-
-fn wrap_text_to_width(value: &str, width: usize) -> Vec<String> {
-    if width == 0 || value.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-    for source_line in value.lines() {
-        let mut current = String::new();
-        let mut used = 0;
-        for ch in source_line.chars() {
-            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if char_width == 0 {
-                current.push(ch);
-                continue;
-            }
-            if char_width > width {
-                if !current.is_empty() {
-                    lines.push(current);
-                    current = String::new();
-                    used = 0;
-                }
-                continue;
-            }
-            if used + char_width > width {
-                lines.push(current);
-                current = String::new();
-                used = 0;
-            }
-            current.push(ch);
-            used += char_width;
-        }
-        lines.push(current);
-    }
-
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn fit_text(value: &str, width: usize, align: Align) -> String {
-    let fitted = truncate_to_width(value, width);
-    let padding = width.saturating_sub(display_width(&fitted));
-    match align {
-        Align::Left => format!("{fitted}{}", " ".repeat(padding)),
-        Align::Right => format!("{}{fitted}", " ".repeat(padding)),
-        Align::Center => {
-            let left = padding / 2;
-            let right = padding - left;
-            format!("{}{fitted}{}", " ".repeat(left), " ".repeat(right))
-        }
-    }
-}
-
-fn truncate_to_width(value: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let mut result = String::new();
-    let mut used = 0;
-    for ch in value.chars() {
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + char_width > width {
-            break;
-        }
-        result.push(ch);
-        used += char_width;
-    }
-    result
-}
-
-fn repeat_to_width(ch: char, width: usize) -> String {
-    let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-    if width == 0 {
-        return String::new();
-    }
-    if char_width == 0 {
-        return "-".repeat(width);
-    }
-
-    let mut result = String::new();
-    let mut used = 0;
-    while used + char_width <= width {
-        result.push(ch);
-        used += char_width;
-    }
-    result.push_str(&" ".repeat(width - used));
-    result
-}
-
-fn display_width(value: &str) -> usize {
-    UnicodeWidthStr::width(value)
-}
-
 fn render_text_value(
     handlebars: &Handlebars,
     tmpl: &str,
@@ -2215,59 +574,11 @@ fn render_text_value(
     Ok(normalize_text_for_encoding(&value, encoding))
 }
 
-fn normalize_text_for_encoding(text: &str, encoding: &str) -> String {
-    let normalized_encoding = encoding.trim().to_ascii_lowercase().replace('-', "");
-    if matches!(normalized_encoding.as_str(), "gbk" | "gb2312" | "cp936") {
-        text.replace('¥', "￥")
-    } else {
-        text.to_string()
-    }
-}
-
-fn render_value(handlebars: &Handlebars, tmpl: &str, data: &Value) -> Result<String, PrinterError> {
-    handlebars
-        .render_template(tmpl, data)
-        .map_err(|e| PrinterError::Render(e.to_string()))
-}
-
-fn value_ref<'a>(data: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut current = data;
-    for part in path.split('.') {
-        match current {
-            Value::Object(map) => current = map.get(part)?,
-            Value::Array(list) => current = part.parse::<usize>().ok().and_then(|i| list.get(i))?,
-            _ => return None,
-        }
-    }
-    Some(current)
-}
-
-fn justify_mode(align: Align) -> JustifyMode {
-    match align {
-        Align::Left => JustifyMode::LEFT,
-        Align::Center => JustifyMode::CENTER,
-        Align::Right => JustifyMode::RIGHT,
-    }
-}
-
-fn hex_decode(hex_str: &str) -> Result<Vec<u8>, PrinterError> {
-    let normalized = hex_str
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>();
-    hex::decode(normalized).map_err(|e| PrinterError::InvalidRawHex(e.to_string()))
-}
-
-fn into_response(result: Result<Value, PrinterError>) -> String {
-    match result {
-        Ok(value) => json!({ "ok": true, "result": value }).to_string(),
-        Err(err) => json!({ "ok": false, "error": err.to_string() }).to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::image::unique_temp_suffix;
+    use base64::Engine;
 
     #[test]
     fn renders_order_template() {
@@ -2374,202 +685,6 @@ mod tests {
         assert!(script.contains("HOME\r\nCLS\r\nBITMAP 0,0,58,320,0,"));
         assert!(script.ends_with("PRINT 1,1\r\n"));
         assert!(!bytes.starts_with(&[0x1b, 0x40]));
-    }
-
-    #[test]
-    fn parses_paper_size_from_template_json() {
-        let template58 = parse_template(
-            &json!({
-                "paperSize": 58,
-                "elements": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let template80 = parse_template(
-            &json!({
-                "paper_size": "80mm",
-                "elements": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let template58_label = parse_template(
-            &json!({
-                "paperSize": "58 小票",
-                "fontFamily": "Noto Sans Arabic",
-                "fontSize": 28,
-                "elements": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let explicit_width = parse_template(
-            &json!({
-                "paperSize": 58,
-                "width": 48,
-                "elements": []
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        assert_eq!(template58.width, 32);
-        assert_eq!(template80.width, 48);
-        assert_eq!(template58_label.width, 32);
-        assert_eq!(
-            template58_label.font_family.as_deref(),
-            Some("Noto Sans Arabic")
-        );
-        assert_eq!(template58_label.font_size, Some(28.0));
-        assert_eq!(explicit_width.width, 48);
-    }
-
-    #[test]
-    fn rejects_unknown_paper_size() {
-        let result = parse_template(
-            &json!({
-                "paperSize": 76,
-                "elements": []
-            })
-            .to_string(),
-        );
-
-        assert!(matches!(result, Err(PrinterError::InvalidTemplate(_))));
-    }
-
-    #[test]
-    fn formats_row_to_receipt_width() {
-        let lines = format_row("合计", "¥88.00", 16);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(display_width(&lines[0]), 16);
-        assert!(lines[0].starts_with("合计"));
-        assert!(lines[0].ends_with("¥88.00"));
-    }
-
-    #[test]
-    fn fits_columns_with_cjk_width_and_alignment() {
-        let name = fit_text("牛肉饭", 8, Align::Left);
-        let amount = fit_text("¥58.00", 8, Align::Right);
-        let line = format!("{name}{amount}");
-
-        assert_eq!(display_width(&name), 8);
-        assert_eq!(amount, "  ¥58.00");
-        assert_eq!(display_width(&line), 16);
-    }
-
-    #[test]
-    fn formats_columns_with_gbk_currency_width() {
-        let amount = normalize_text_for_encoding("¥58.00", "gbk");
-        let lines = format_columns(&[
-            ("招牌牛肉饭".to_string(), 16, Align::Left),
-            ("2".to_string(), 6, Align::Right),
-            (amount, 10, Align::Right),
-        ]);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(display_width(&lines[0]), 32);
-        assert!(lines[0].ends_with("￥58.00"));
-    }
-
-    #[test]
-    fn wraps_long_column_values_without_moving_amount() {
-        let lines = format_columns(&[
-            ("超长招牌牛肉饭大份".to_string(), 12, Align::Left),
-            ("2".to_string(), 6, Align::Right),
-            ("￥58.00".to_string(), 10, Align::Right),
-        ]);
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(display_width(&lines[0]), 28);
-        assert_eq!(display_width(&lines[1]), 28);
-        assert!(lines[0].contains("￥58.00"));
-        assert!(!lines[1].contains("￥58.00"));
-    }
-
-    #[test]
-    fn wraps_note_columns_with_hanging_indent() {
-        let lines = format_columns(&[
-            ("  备注：".to_string(), 8, Align::Left),
-            ("不要洋葱不要香菜需要分开打包".to_string(), 12, Align::Left),
-        ]);
-
-        assert_eq!(lines.len(), 3);
-        assert_eq!(display_width(&lines[0]), 20);
-        assert_eq!(display_width(&lines[1]), 20);
-        assert_eq!(display_width(&lines[2]), 20);
-        assert!(lines[0].starts_with("  备注："));
-        assert!(lines[1].starts_with("        "));
-        assert!(lines[2].starts_with("        "));
-    }
-
-    #[test]
-    fn truncates_long_column_without_overflowing_width() {
-        let value = fit_text("超长商品名称", 8, Align::Left);
-
-        assert_eq!(display_width(&value), 8);
-        assert_eq!(value, "超长商品");
-    }
-
-    #[test]
-    fn encodes_cjk_text_as_gbk_for_escpos_printers() {
-        let bytes = encode_printer_text("牛肉饭 ¥58.00", "gbk").unwrap();
-
-        assert_eq!(
-            bytes,
-            vec![
-                0xc5, 0xa3, 0xc8, 0xe2, 0xb7, 0xb9, b' ', 0xa3, 0xa4, b'5', b'8', b'.', b'0', b'0'
-            ]
-        );
-    }
-
-    #[test]
-    fn encodes_utf8_text_when_requested() {
-        let bytes = encode_printer_text("牛肉饭", "utf-8").unwrap();
-
-        assert_eq!(bytes, "牛肉饭".as_bytes());
-    }
-
-    #[test]
-    fn rejects_unsupported_text_encoding() {
-        let result = encode_printer_text("hello", "shift_jis");
-
-        assert!(matches!(result, Err(PrinterError::Encode(_))));
-    }
-
-    #[test]
-    fn normalizes_mdns_service_types() {
-        assert_eq!(
-            normalize_mdns_service_type("ipp").unwrap(),
-            "_ipp._tcp.local."
-        );
-        assert_eq!(
-            normalize_mdns_service_type("_pdl-datastream._tcp").unwrap(),
-            "_pdl-datastream._tcp.local."
-        );
-        assert_eq!(
-            normalize_mdns_service_type("_printer._tcp.local").unwrap(),
-            "_printer._tcp.local."
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_mdns_service_types() {
-        let result = normalize_mdns_service_type("_bad._http.local.");
-
-        assert!(matches!(result, Err(PrinterError::Discovery(_))));
-    }
-
-    #[test]
-    fn detects_raw_tcp_printer_services_conservatively() {
-        assert!(supports_raw_tcp_service(
-            "_pdl-datastream._tcp.local.",
-            9100
-        ));
-        assert!(supports_raw_tcp_service("_printer._tcp.local.", 9100));
-        assert!(!supports_raw_tcp_service("_printer._tcp.local.", 515));
-        assert!(!supports_raw_tcp_service("_ipp._tcp.local.", 631));
     }
 
     #[test]
@@ -2749,22 +864,6 @@ mod tests {
 
         assert!(!hex.is_empty());
         assert!(result["length"].as_u64().unwrap_or(0) > 1024);
-    }
-
-    #[test]
-    fn temp_image_guard_removes_file_on_drop() {
-        let path = std::env::temp_dir().join(format!(
-            "kservice-printer-receipt-drop-test-{}.png",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"temporary").unwrap();
-
-        {
-            let _guard = TempImageFile::new(path.to_string_lossy().into_owned());
-            assert!(path.exists());
-        }
-
-        assert!(!path.exists());
     }
 
     #[test]

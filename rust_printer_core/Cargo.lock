@@ -1055,6 +1055,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "unicode-width",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
