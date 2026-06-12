@@ -180,7 +180,7 @@ jobs:
 
   build-windows:
     name: Build Windows
-    runs-on: windows-2025
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
