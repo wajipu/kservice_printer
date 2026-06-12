@@ -54,10 +54,17 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
             option.mode == ReceiptPrintMode.text,
         orElse: () => builtInReceiptTemplateOptions.first,
       );
+  final _labelHeightMmController = TextEditingController(text: '40');
+  final _labelGapMmController = TextEditingController(text: '2');
+  final _labelDensityController = TextEditingController(text: '8');
+  final _labelSpeedController = TextEditingController(text: '4');
 
   bool _busy = false;
   bool _scanningUsb = false;
   bool _scanningNetwork = false;
+  bool _useJsonEditor = false;
+  final _templateJsonController = TextEditingController();
+  final _dataJsonController = TextEditingController();
   String _status = '等待操作';
   String _details = '请选择连接方式和模板，然后渲染或打印测试订单。';
   List<UsbPrinterInfo> _usbPrinters = const [];
@@ -74,6 +81,12 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
     _usbProductController.dispose();
     _serialPortController.dispose();
     _serialBaudController.dispose();
+    _labelHeightMmController.dispose();
+    _labelGapMmController.dispose();
+    _labelDensityController.dispose();
+    _labelSpeedController.dispose();
+    _templateJsonController.dispose();
+    _dataJsonController.dispose();
     super.dispose();
   }
 
@@ -120,12 +133,55 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
     'label': {'remark': '冷藏保存'},
   };
 
-  PrintJob get _job => PrintJob(
+  PrintJob get _job => _useJsonEditor ? _jobFromJson() : _jobFromTemplate;
+  PrintJob get _jobFromTemplate => PrintJob(
     type: _selectedTemplate.type,
     connection: _connection,
-    template: _selectedTemplate.buildTemplate(),
+    template: _buildSelectedTemplate(),
     data: _sampleData,
   );
+
+  PrintJob _jobFromJson() {
+    final templateJson = _templateJsonController.text.trim();
+    final dataJson = _dataJsonController.text.trim();
+    final template = ReceiptTemplate.fromJson(
+      jsonDecode(templateJson) as Map<String, dynamic>,
+    );
+    final data = jsonDecode(dataJson) as Map<String, Object?>;
+    return PrintJob(
+      type: PrintJobType.custom,
+      connection: _connection,
+      template: template,
+      data: data,
+    );
+  }
+
+  void _syncJsonControllers() {
+    final template = _buildSelectedTemplate();
+    _templateJsonController.text = const JsonEncoder.withIndent('  ').convert(template.toJson());
+    _dataJsonController.text = const JsonEncoder.withIndent('  ').convert(_sampleData);
+  }
+
+  ReceiptTemplate _buildSelectedTemplate() {
+    final base = _selectedTemplate.buildTemplate();
+    final isTspl = _selectedTemplate.type == PrintJobType.label &&
+        (_selectedTemplate.mode == ReceiptPrintMode.tspl ||
+            _selectedTemplate.mode == ReceiptPrintMode.tsplImage);
+    if (!isTspl) return base;
+    final height = double.tryParse(_labelHeightMmController.text.trim());
+    final gap = double.tryParse(_labelGapMmController.text.trim());
+    final density = int.tryParse(_labelDensityController.text.trim());
+    final speed = int.tryParse(_labelSpeedController.text.trim());
+    if (height == null && gap == null && density == null && speed == null) {
+      return base;
+    }
+    return base.copyWith(
+      labelHeightMm: height ?? base.labelHeightMm,
+      labelGapMm: gap ?? base.labelGapMm,
+      labelDensity: density ?? base.labelDensity,
+      labelSpeed: speed ?? base.labelSpeed,
+    );
+  }
 
   PrinterConnection get _connection {
     return switch (_connectionMode) {
@@ -699,42 +755,124 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        DropdownButtonFormField<ReceiptTemplateOption>(
-          initialValue: _selectedTemplate,
-          decoration: const InputDecoration(
-            labelText: '打印模板',
-            prefixIcon: Icon(Icons.view_list),
+        SwitchListTile(
+          title: const Text('JSON 编辑模式'),
+          subtitle: Text(_useJsonEditor ? '直接编辑模板 JSON' : '使用模板向导'),
+          value: _useJsonEditor,
+          onChanged: (v) {
+            if (v) _syncJsonControllers();
+            setState(() => _useJsonEditor = v);
+          },
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+        ),
+        const SizedBox(height: 8),
+        if (_useJsonEditor) ...[
+          _TextField(
+            controller: _templateJsonController,
+            label: '模板 JSON',
+            prefixIcon: Icons.code,
+            maxLines: 15,
+            minLines: 8,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
           ),
-          items: [
-            for (final option in builtInReceiptTemplateOptions)
-              DropdownMenuItem(value: option, child: Text(option.displayName)),
+          const SizedBox(height: 12),
+          _TextField(
+            controller: _dataJsonController,
+            label: '数据 JSON',
+            prefixIcon: Icons.dataset,
+            maxLines: 15,
+            minLines: 8,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+          ),
+        ] else ...[
+          DropdownButtonFormField<ReceiptTemplateOption>(
+            initialValue: _selectedTemplate,
+            decoration: const InputDecoration(
+              labelText: '打印模板',
+              prefixIcon: Icon(Icons.view_list),
+            ),
+            items: [
+              for (final option in builtInReceiptTemplateOptions)
+                DropdownMenuItem(value: option, child: Text(option.displayName)),
+            ],
+            onChanged: _busy
+                ? null
+                : (option) {
+                    if (option == null) return;
+                    setState(() => _selectedTemplate = option);
+                  },
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _Chip(label: _selectedTemplate.type.displayName),
+              _Chip(label: _selectedTemplate.paperSize.displayName),
+              _Chip(label: _selectedTemplate.mode.displayName),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _InfoLine(
+            label: '模板编码',
+            value: _buildSelectedTemplate().encoding,
+          ),
+          _InfoLine(
+            label: '字符宽度',
+            value: '${_buildSelectedTemplate().width} 列',
+          ),
+          if (_selectedTemplate.type == PrintJobType.label &&
+              (_selectedTemplate.mode == ReceiptPrintMode.tspl ||
+                  _selectedTemplate.mode == ReceiptPrintMode.tsplImage)) ...[
+            const SizedBox(height: 12),
+            Text('标签参数', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _TextField(
+                    controller: _labelHeightMmController,
+                    label: '标签高度 (mm)',
+                    prefixIcon: Icons.height,
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _TextField(
+                    controller: _labelGapMmController,
+                    label: '间隙 (mm)',
+                    prefixIcon: Icons.space_bar,
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _TextField(
+                    controller: _labelDensityController,
+                    label: '浓度 (density)',
+                    prefixIcon: Icons.opacity,
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _TextField(
+                    controller: _labelSpeedController,
+                    label: '速度 (speed)',
+                    prefixIcon: Icons.speed,
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
           ],
-          onChanged: _busy
-              ? null
-              : (option) {
-                  if (option == null) return;
-                  setState(() => _selectedTemplate = option);
-                },
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            _Chip(label: _selectedTemplate.type.displayName),
-            _Chip(label: _selectedTemplate.paperSize.displayName),
-            _Chip(label: _selectedTemplate.mode.displayName),
-          ],
-        ),
-        const SizedBox(height: 12),
-        _InfoLine(
-          label: '模板编码',
-          value: _selectedTemplate.buildTemplate().encoding,
-        ),
-        _InfoLine(
-          label: '字符宽度',
-          value: '${_selectedTemplate.buildTemplate().width} 列',
-        ),
+        ],
       ],
     );
   }
@@ -833,13 +971,15 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
     );
   }
 
-  int _parseInt(String value, {required int fallback}) {
+  int _parseInt(String value, {int? fallback}) {
     final trimmed = value.trim();
     if (trimmed.startsWith('0x') || trimmed.startsWith('0X')) {
-      return int.tryParse(trimmed.substring(2), radix: 16) ?? fallback;
+      return int.tryParse(trimmed.substring(2), radix: 16) ?? fallback ?? 0;
     }
-    return int.tryParse(trimmed) ?? fallback;
+    return int.tryParse(trimmed) ?? fallback ?? 0;
   }
+
+
 
   String _shortHex(String hex) {
     if (hex.length <= 160) {
@@ -960,18 +1100,27 @@ class _TextField extends StatelessWidget {
     required this.label,
     required this.prefixIcon,
     this.keyboardType,
+    this.maxLines = 1,
+    this.minLines,
+    this.style,
   });
 
   final TextEditingController controller;
   final String label;
   final IconData prefixIcon;
   final TextInputType? keyboardType;
+  final int? maxLines;
+  final int? minLines;
+  final TextStyle? style;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
+      maxLines: maxLines,
+      minLines: minLines,
+      style: style,
       decoration: InputDecoration(
         labelText: label,
         prefixIcon: Icon(prefixIcon),

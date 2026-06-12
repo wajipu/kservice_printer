@@ -325,6 +325,12 @@ fn render_template_to_label_image(
     let height = (template.label_height_mm.unwrap_or(40.0) * TSPL_DOTS_PER_MM).round() as u32;
     let mut image = GrayImage::from_pixel(width.max(8), height.max(8), Luma([255]));
     let mut y = TSPL_MARGIN_Y;
+
+    // Load system fonts once for all text rendering on this label.
+    let mut font_system = FontSystem::new();
+    font_system.db_mut().load_system_fonts();
+    let mut swash_cache = SwashCache::new();
+
     render_tspl_image_elements(
         &mut image,
         &mut y,
@@ -332,6 +338,8 @@ fn render_template_to_label_image(
         data,
         handlebars,
         template,
+        &mut font_system,
+        &mut swash_cache,
     )?;
     Ok(image)
 }
@@ -343,6 +351,8 @@ fn render_tspl_image_elements(
     data: &Value,
     handlebars: &Handlebars,
     template: &Template,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
 ) -> Result<(), PrinterError> {
     for element in elements {
         match element {
@@ -377,6 +387,8 @@ fn render_tspl_image_elements(
                             bold: *bold,
                             font_family: template.font_family.as_deref(),
                         },
+                        font_system,
+                        swash_cache,
                     );
                     *y += line_height;
                 }
@@ -398,6 +410,8 @@ fn render_tspl_image_elements(
                         bold: *bold,
                         font_family: template.font_family.as_deref(),
                     },
+                    font_system,
+                    swash_cache,
                 );
                 draw_label_text(
                     image,
@@ -411,6 +425,8 @@ fn render_tspl_image_elements(
                         bold: *bold,
                         font_family: template.font_family.as_deref(),
                     },
+                    font_system,
+                    swash_cache,
                 );
                 *y += line_height;
             }
@@ -434,6 +450,8 @@ fn render_tspl_image_elements(
                             bold,
                             font_family: template.font_family.as_deref(),
                         },
+                        font_system,
+                        swash_cache,
                     );
                     *y += TSPL_TEXT_LINE_HEIGHT;
                 }
@@ -452,7 +470,7 @@ fn render_tspl_image_elements(
             Element::Repeat { path, elements } => {
                 if let Some(Value::Array(items)) = value_ref(data, path) {
                     for item in items {
-                        render_tspl_image_elements(image, y, elements, item, handlebars, template)?;
+                        render_tspl_image_elements(image, y, elements, item, handlebars, template, font_system, swash_cache)?;
                     }
                 }
             }
@@ -490,7 +508,13 @@ struct TextDrawSpec<'a> {
     font_family: Option<&'a str>,
 }
 
-fn draw_label_text(image: &mut GrayImage, text: &str, spec: LabelTextSpec<'_>) {
+fn draw_label_text(
+    image: &mut GrayImage,
+    text: &str,
+    spec: LabelTextSpec<'_>,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+) {
     let line_height = (spec.font_size * 1.35).ceil();
     let estimated_width = estimate_bitmap_text_width(text, spec.font_size);
     let draw_x = match spec.align {
@@ -509,6 +533,8 @@ fn draw_label_text(image: &mut GrayImage, text: &str, spec: LabelTextSpec<'_>) {
             line_height,
             font_family: spec.font_family,
         },
+        font_system,
+        swash_cache,
     );
     if spec.bold {
         draw_text_at(
@@ -522,17 +548,23 @@ fn draw_label_text(image: &mut GrayImage, text: &str, spec: LabelTextSpec<'_>) {
                 line_height,
                 font_family: spec.font_family,
             },
+            font_system,
+            swash_cache,
         );
     }
 }
 
-fn draw_text_at(image: &mut GrayImage, text: &str, spec: TextDrawSpec<'_>) {
-    let mut font_system = FontSystem::new();
-    let mut swash_cache = SwashCache::new();
+fn draw_text_at(
+    image: &mut GrayImage,
+    text: &str,
+    spec: TextDrawSpec<'_>,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+) {
     let metrics = Metrics::new(spec.font_size, spec.line_height);
-    let mut buffer = Buffer::new(&mut font_system, metrics);
+    let mut buffer = Buffer::new(font_system, metrics);
     buffer.set_size(
-        &mut font_system,
+        font_system,
         Some(spec.width as f32),
         Some(spec.line_height * 2.0),
     );
@@ -544,13 +576,13 @@ fn draw_text_at(image: &mut GrayImage, text: &str, spec: TextDrawSpec<'_>) {
     {
         attrs = attrs.family(Family::Name(font_family));
     }
-    buffer.set_text(&mut font_system, text, &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(&mut font_system, false);
+    buffer.set_text(font_system, text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
     let image_width = image.width() as i32;
     let image_height = image.height() as i32;
     buffer.draw(
-        &mut font_system,
-        &mut swash_cache,
+        font_system,
+        swash_cache,
         Color::rgb(0, 0, 0),
         |glyph_x, glyph_y, w, h, color| {
             let alpha = (color.0 >> 24) as u8;

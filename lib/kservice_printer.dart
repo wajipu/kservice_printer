@@ -128,11 +128,22 @@ class ReceiptTemplateOption {
     required this.type,
     required this.paperSize,
     this.mode = ReceiptPrintMode.text,
+    this.labelHeightMm,
+    this.labelGapMm,
+    this.labelDensity,
+    this.labelSpeed,
+    this.labelHomeBeforePrint,
   });
 
   final PrintJobType type;
   final ReceiptPaperSize paperSize;
   final ReceiptPrintMode mode;
+
+  final double? labelHeightMm;
+  final double? labelGapMm;
+  final int? labelDensity;
+  final int? labelSpeed;
+  final bool? labelHomeBeforePrint;
 
   String get code => '${type.code}_${paperSize.name}_${mode.name}';
 
@@ -149,7 +160,16 @@ class ReceiptTemplateOption {
       '${type.displayName} · $paperDisplayName · ${mode.displayName}';
 
   ReceiptTemplate buildTemplate() =>
-      defaultTemplateForPrintJobType(type, paperSize: paperSize, mode: mode);
+      defaultTemplateForPrintJobType(
+        type,
+        paperSize: paperSize,
+        mode: mode,
+        labelHeightMm: labelHeightMm,
+        labelGapMm: labelGapMm,
+        labelDensity: labelDensity,
+        labelSpeed: labelSpeed,
+        labelHomeBeforePrint: labelHomeBeforePrint,
+      );
 }
 
 /// 内置模板选择项，适合直接绑定到下拉框/设置页。
@@ -253,6 +273,60 @@ class ReceiptTemplate {
   final int? labelReferenceY;
   final int? labelShiftDots;
   final List<Map<String, Object?>> elements;
+
+  ReceiptTemplate copyWith({
+    int? width,
+    String? encoding,
+    String? fontFamily,
+    double? fontSize,
+    double? labelWidthMm,
+    double? labelHeightMm,
+    double? labelGapMm,
+    int? labelDensity,
+    int? labelSpeed,
+    bool? labelHomeBeforePrint,
+    int? labelReferenceX,
+    int? labelReferenceY,
+    int? labelShiftDots,
+    List<Map<String, Object?>>? elements,
+  }) =>
+      ReceiptTemplate(
+        width: width ?? this.width,
+        encoding: encoding ?? this.encoding,
+        fontFamily: fontFamily ?? this.fontFamily,
+        fontSize: fontSize ?? this.fontSize,
+        labelWidthMm: labelWidthMm ?? this.labelWidthMm,
+        labelHeightMm: labelHeightMm ?? this.labelHeightMm,
+        labelGapMm: labelGapMm ?? this.labelGapMm,
+        labelDensity: labelDensity ?? this.labelDensity,
+        labelSpeed: labelSpeed ?? this.labelSpeed,
+        labelHomeBeforePrint:
+            labelHomeBeforePrint ?? this.labelHomeBeforePrint,
+        labelReferenceX: labelReferenceX ?? this.labelReferenceX,
+        labelReferenceY: labelReferenceY ?? this.labelReferenceY,
+        labelShiftDots: labelShiftDots ?? this.labelShiftDots,
+        elements: elements ?? this.elements,
+      );
+
+  factory ReceiptTemplate.fromJson(Map<String, dynamic> json) {
+    return ReceiptTemplate(
+      width: json['width'] as int? ?? 48,
+      encoding: json['encoding'] as String? ?? 'gbk',
+      fontFamily: json['fontFamily'] as String?,
+      fontSize: (json['fontSize'] as num?)?.toDouble(),
+      labelWidthMm: (json['labelWidthMm'] as num?)?.toDouble(),
+      labelHeightMm: (json['labelHeightMm'] as num?)?.toDouble(),
+      labelGapMm: (json['labelGapMm'] as num?)?.toDouble(),
+      labelDensity: json['labelDensity'] as int?,
+      labelSpeed: json['labelSpeed'] as int?,
+      labelHomeBeforePrint: json['labelHomeBeforePrint'] as bool?,
+      labelReferenceX: json['labelReferenceX'] as int?,
+      labelReferenceY: json['labelReferenceY'] as int?,
+      labelShiftDots: json['labelShiftDots'] as int?,
+      elements: (json['elements'] as List<dynamic>)
+          .cast<Map<String, Object?>>(),
+    );
+  }
 
   Map<String, Object?> toJson() => {
     'width': width,
@@ -1063,12 +1137,22 @@ ReceiptTemplate defaultTemplateForPrintJobType(
   ReceiptPrintMode mode = ReceiptPrintMode.text,
   String? fontFamily,
   double? fontSize,
+  double? labelHeightMm,
+  double? labelGapMm,
+  int? labelDensity,
+  int? labelSpeed,
+  bool? labelHomeBeforePrint,
 }) {
   final templateWidth = width ?? paperSize?.width;
   if (type == PrintJobType.label && mode == ReceiptPrintMode.tsplImage) {
     return defaultTsplLabelImageTemplate(
       width: templateWidth ?? ReceiptPaperSize.mm58.width,
       widthMm: _labelWidthMmForPaper(paperSize),
+      heightMm: labelHeightMm ?? 40,
+      gapMm: labelGapMm ?? 2,
+      density: labelDensity ?? 8,
+      speed: labelSpeed ?? 4,
+      homeBeforePrint: labelHomeBeforePrint ?? true,
       fontFamily: fontFamily,
       fontSize: fontSize,
     );
@@ -1078,6 +1162,11 @@ ReceiptTemplate defaultTemplateForPrintJobType(
     return defaultTsplLabelTemplate(
       width: templateWidth ?? ReceiptPaperSize.mm58.width,
       widthMm: _labelWidthMmForPaper(paperSize),
+      heightMm: labelHeightMm ?? 40,
+      gapMm: labelGapMm ?? 2,
+      density: labelDensity ?? 8,
+      speed: labelSpeed ?? 4,
+      homeBeforePrint: labelHomeBeforePrint ?? true,
     );
   }
 
