@@ -618,11 +618,11 @@ class NetworkPrinterDiscoveryResult {
   factory NetworkPrinterDiscoveryResult.fromJson(Map<String, dynamic> json) {
     final printers = json['printers'];
     return NetworkPrinterDiscoveryResult(
-      printers: [
+      printers: _dedupeNetworkPrinters([
         if (printers is List)
           for (final item in printers)
             if (item is Map<String, dynamic>) NetworkPrinterInfo.fromJson(item),
-      ],
+      ]),
       serviceTypes: _stringList(json['serviceTypes']),
       timeoutMs: json['timeoutMs'] is num
           ? (json['timeoutMs'] as num).toInt()
@@ -633,6 +633,59 @@ class NetworkPrinterDiscoveryResult {
       timedOut: json['timedOut'] == true,
     );
   }
+}
+
+List<NetworkPrinterInfo> _dedupeNetworkPrinters(
+  List<NetworkPrinterInfo> printers,
+) {
+  final byDevice = <String, NetworkPrinterInfo>{};
+  for (final printer in printers) {
+    final key = _networkPrinterDeviceKey(printer);
+    final existing = byDevice[key];
+    if (existing == null ||
+        _networkPrinterPreference(printer) >
+            _networkPrinterPreference(existing)) {
+      byDevice[key] = printer;
+    }
+  }
+  return byDevice.values.toList();
+}
+
+String _networkPrinterDeviceKey(NetworkPrinterInfo printer) {
+  final host = printer.host.trim().toLowerCase();
+  if (host.isNotEmpty) {
+    return 'host:$host';
+  }
+  final hostname = printer.hostname.trim().toLowerCase();
+  if (hostname.isNotEmpty) {
+    return 'hostname:$hostname';
+  }
+  final serviceName = printer.serviceName.trim().toLowerCase();
+  if (serviceName.isNotEmpty) {
+    return 'service:$serviceName';
+  }
+  return 'fullname:${printer.fullname.trim().toLowerCase()}';
+}
+
+int _networkPrinterPreference(NetworkPrinterInfo printer) {
+  final serviceType = printer.serviceType.toLowerCase();
+  var score = 0;
+  if (printer.supportsRawTcp) {
+    score += 1000;
+  }
+  if (printer.port == 9100) {
+    score += 200;
+  }
+  if (serviceType.contains('_pdl-datastream._tcp')) {
+    score += 100;
+  } else if (serviceType.contains('_printer._tcp')) {
+    score += 30;
+  } else if (serviceType.contains('_ipps._tcp')) {
+    score += 20;
+  } else if (serviceType.contains('_ipp._tcp')) {
+    score += 10;
+  }
+  return score;
 }
 
 /// 通过 mDNS/DNS-SD 扫描局域网/WiFi 中可见的网络打印服务。

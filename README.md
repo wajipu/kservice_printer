@@ -109,6 +109,8 @@ final allUsbDevices = await listUsbPrinters(includeNonPrinters: true);
 - Linux：没有 App manifest 权限；网络发现/网络打印通常不需要应用级权限，但防火墙可能影响 mDNS UDP 5353。普通用户访问 USB 设备通常需要 udev 规则或加入对应设备组，否则 libusb 可能只能用 `sudo` 访问。
 - Windows：普通 Flutter Win32 App 没有类似 macOS 的网络 entitlement；网络发现/网络打印通常不需要 manifest 能力，但防火墙可能影响 mDNS UDP 5353。USB 直连依赖设备绑定 WinUSB/libusb 兼容驱动。如果打印机使用厂商专用驱动或系统打印队列，libusb 扫描/直连可能不可用。
 
+网络模式如果报 `Operation not permitted (os error 1)`，通常是宿主应用被系统策略拒绝创建 TCP socket；macOS 优先检查当前运行的 `.app` 是否实际签入了 `com.apple.security.network.client`，Android 优先检查最终合并后的 Manifest 是否仍包含 `android.permission.INTERNET`。
+
 ### 打印示例
 
 ```dart

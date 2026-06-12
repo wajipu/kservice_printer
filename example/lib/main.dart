@@ -315,8 +315,8 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
           _applyNetworkPrinter(rawTcpPrinter);
         }
         _status = printers.isEmpty
-            ? '没有发现网络打印服务'
-            : '发现 ${printers.length} 个网络打印服务';
+            ? '没有发现网络打印机'
+            : '发现 ${printers.length} 台网络打印机';
         _details = printers.isEmpty
             ? '请确认设备和本机在同一 WiFi/局域网，且路由器未禁用 mDNS。'
             : [
@@ -619,7 +619,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
               DropdownButtonFormField<NetworkPrinterInfo>(
                 initialValue: _selectedNetworkPrinter,
                 decoration: const InputDecoration(
-                  labelText: '网络打印服务',
+                  labelText: '网络打印机',
                   prefixIcon: Icon(Icons.wifi_tethering),
                 ),
                 items: [

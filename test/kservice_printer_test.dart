@@ -243,6 +243,60 @@ void main() {
     expect(printer.connection().queueKey, 'network:192.168.1.50:9100');
   });
 
+  test('deduplicates network services for the same printer device', () {
+    final result = NetworkPrinterDiscoveryResult.fromJson({
+      'timeoutMs': 3000,
+      'durationMs': 3000,
+      'timedOut': true,
+      'serviceTypes': [
+        '_printer._tcp.local.',
+        '_ipp._tcp.local.',
+        '_pdl-datastream._tcp.local.',
+      ],
+      'printers': [
+        {
+          'serviceName': 'EPSON L4260 Series',
+          'serviceType': '_printer._tcp.local.',
+          'fullname': 'EPSON L4260 Series._printer._tcp.local.',
+          'hostname': 'epson.local',
+          'host': '192.168.40.9',
+          'port': 515,
+          'addresses': ['192.168.40.9'],
+          'txt': {},
+          'supportsRawTcp': false,
+        },
+        {
+          'serviceName': 'EPSON L4260 Series',
+          'serviceType': '_ipp._tcp.local.',
+          'fullname': 'EPSON L4260 Series._ipp._tcp.local.',
+          'hostname': 'epson.local',
+          'host': '192.168.40.9',
+          'port': 631,
+          'addresses': ['192.168.40.9'],
+          'txt': {},
+          'supportsRawTcp': false,
+        },
+        {
+          'serviceName': 'EPSON L4260 Series',
+          'serviceType': '_pdl-datastream._tcp.local.',
+          'fullname': 'EPSON L4260 Series._pdl-datastream._tcp.local.',
+          'hostname': 'epson.local',
+          'host': '192.168.40.9',
+          'port': 9100,
+          'addresses': ['192.168.40.9'],
+          'txt': {},
+          'supportsRawTcp': true,
+        },
+      ],
+    });
+
+    final printer = result.printers.single;
+
+    expect(printer.displayName, 'EPSON L4260 Series · 192.168.40.9:9100');
+    expect(printer.port, 9100);
+    expect(printer.supportsRawTcp, isTrue);
+  });
+
   test('parses Android USB permission metadata', () {
     final printer = UsbPrinterInfo.fromJson({
       'vendorId': 0x0483,
