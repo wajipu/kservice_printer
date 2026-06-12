@@ -673,7 +673,7 @@ fn estimate_bitmap_text_width(value: &str, font_size: f32) -> i32 {
 // ---------- TSPL 辅助函数 ----------
 
 fn tspl_label_width_mm(template: &Template) -> f32 {
-    template.label_width_mm.unwrap_or_else(|| {
+    template.label_width_mm.unwrap_or({
         if template.width <= 40 {
             58.0
         } else {
