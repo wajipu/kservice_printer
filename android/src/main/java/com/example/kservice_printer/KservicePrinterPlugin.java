@@ -1,10 +1,12 @@
 package com.example.kservice_printer;
 
+import android.Manifest;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
@@ -532,6 +534,13 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
         }
 
         private void startOnMain() throws JSONException {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                    && context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES)
+                            != PackageManager.PERMISSION_GRANTED) {
+                finishError("缺少 Android Nearby Wi-Fi Devices 运行时权限，无法扫描 mDNS 打印服务");
+                return;
+            }
+
             nsdManager = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
             if (nsdManager == null) {
                 finishError("Android 系统未提供 NsdManager，无法扫描 mDNS 服务");

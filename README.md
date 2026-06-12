@@ -86,7 +86,7 @@ final result = await discoverNetworkPrinters(
 );
 ```
 
-Android 插件 Manifest 会合并 `INTERNET`、`ACCESS_NETWORK_STATE`、`ACCESS_WIFI_STATE`、`CHANGE_WIFI_MULTICAST_STATE`、`NEARBY_WIFI_DEVICES` 和 `android.hardware.usb.host`。如果业务 App targetSdk 为 33+ 且系统要求 Nearby Wi-Fi 权限，请在调用扫描前完成运行时授权；iOS 当前不考虑支持。
+Android 插件 Manifest 会合并 `INTERNET`、`ACCESS_NETWORK_STATE`、`ACCESS_WIFI_STATE`、`CHANGE_WIFI_MULTICAST_STATE`、`NEARBY_WIFI_DEVICES` 和 `android.hardware.usb.host`。如果业务 App targetSdk 为 33+ 且系统要求 Nearby Wi-Fi 权限，请在调用扫描前完成运行时授权，例如用 `permission_handler` 请求 Nearby Wi-Fi Devices；插件会在权限缺失时返回明确错误。iOS 当前不考虑支持。
 
 ### 自动发现 USB 打印机
 
@@ -104,10 +104,10 @@ final allUsbDevices = await listUsbPrinters(includeNonPrinters: true);
 
 ### 平台权限说明
 
-- macOS：如果宿主 App 开启 App Sandbox，需要在 `DebugProfile.entitlements` 和 `Release.entitlements` 中加入 `com.apple.security.device.usb`。示例 App 已配置。
-- Android：`listUsbPrinters()` 走原生 `UsbManager` 扫描，默认过滤非打印机设备；返回的 `UsbPrinterInfo.hasPermission` 表示系统是否已授权该 USB 设备；`requestUsbPrinterPermission(printer)` 可请求该设备授权。USB 打印仍需要业务侧或后续插件版本实现 Android file descriptor 打印通道。
-- Linux：没有 App manifest 权限；普通用户访问 USB 设备通常需要 udev 规则或加入对应设备组，否则 libusb 可能只能用 `sudo` 访问。
-- Windows：没有 Flutter manifest 权限；USB 直连依赖设备绑定 WinUSB/libusb 兼容驱动。如果打印机使用厂商专用驱动或系统打印队列，libusb 扫描/直连可能不可用。
+- macOS：如果宿主 App 开启 App Sandbox，USB 扫描/打印需要 `com.apple.security.device.usb`，网络打印和 mDNS 发现需要 `com.apple.security.network.client`；mDNS 接收响应时建议同时保留 `com.apple.security.network.server`。示例 App 已配置。
+- Android：网络发现的 manifest 权限已由插件合并；Android 13+ 的 `NEARBY_WIFI_DEVICES` 是运行时权限，需要业务 App 在扫描前请求。`listUsbPrinters()` 走原生 `UsbManager` 扫描，默认过滤非打印机设备；返回的 `UsbPrinterInfo.hasPermission` 表示系统是否已授权该 USB 设备；`requestUsbPrinterPermission(printer)` 可请求该设备授权。USB 打印仍需要业务侧或后续插件版本实现 Android file descriptor 打印通道。
+- Linux：没有 App manifest 权限；网络发现/网络打印通常不需要应用级权限，但防火墙可能影响 mDNS UDP 5353。普通用户访问 USB 设备通常需要 udev 规则或加入对应设备组，否则 libusb 可能只能用 `sudo` 访问。
+- Windows：普通 Flutter Win32 App 没有类似 macOS 的网络 entitlement；网络发现/网络打印通常不需要 manifest 能力，但防火墙可能影响 mDNS UDP 5353。USB 直连依赖设备绑定 WinUSB/libusb 兼容驱动。如果打印机使用厂商专用驱动或系统打印队列，libusb 扫描/直连可能不可用。
 
 ### 打印示例
 
