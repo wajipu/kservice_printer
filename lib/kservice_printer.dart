@@ -104,6 +104,9 @@ enum ReceiptPrintMode {
 
   /// 将整张标签渲染成 TSPL 位图，适合复杂文字和精确版式。
   tsplImage,
+
+  /// 将整张标签渲染成 TSPL BAR 栅格，适合不兼容二进制 BITMAP 的设备。
+  tsplRaster,
 }
 
 extension ReceiptPrintModeInfo on ReceiptPrintMode {
@@ -112,6 +115,7 @@ extension ReceiptPrintModeInfo on ReceiptPrintMode {
     ReceiptPrintMode.image => 'image',
     ReceiptPrintMode.tspl => 'tspl',
     ReceiptPrintMode.tsplImage => 'tspl-image',
+    ReceiptPrintMode.tsplRaster => 'tspl-raster',
   };
 
   String get displayName => switch (this) {
@@ -119,6 +123,7 @@ extension ReceiptPrintModeInfo on ReceiptPrintMode {
     ReceiptPrintMode.image => '图片打印',
     ReceiptPrintMode.tspl => 'TSPL 标签',
     ReceiptPrintMode.tsplImage => 'TSPL 图片标签',
+    ReceiptPrintMode.tsplRaster => 'TSPL 兼容图片标签',
   };
 }
 
@@ -149,7 +154,9 @@ class ReceiptTemplateOption {
 
   String get paperDisplayName =>
       type == PrintJobType.label &&
-          (mode == ReceiptPrintMode.tspl || mode == ReceiptPrintMode.tsplImage)
+          (mode == ReceiptPrintMode.tspl ||
+              mode == ReceiptPrintMode.tsplImage ||
+              mode == ReceiptPrintMode.tsplRaster)
       ? switch (paperSize) {
           ReceiptPaperSize.mm58 => '58mm 标签',
           ReceiptPaperSize.mm80 => '80mm 标签',
@@ -159,17 +166,16 @@ class ReceiptTemplateOption {
   String get displayName =>
       '${type.displayName} · $paperDisplayName · ${mode.displayName}';
 
-  ReceiptTemplate buildTemplate() =>
-      defaultTemplateForPrintJobType(
-        type,
-        paperSize: paperSize,
-        mode: mode,
-        labelHeightMm: labelHeightMm,
-        labelGapMm: labelGapMm,
-        labelDensity: labelDensity,
-        labelSpeed: labelSpeed,
-        labelHomeBeforePrint: labelHomeBeforePrint,
-      );
+  ReceiptTemplate buildTemplate() => defaultTemplateForPrintJobType(
+    type,
+    paperSize: paperSize,
+    mode: mode,
+    labelHeightMm: labelHeightMm,
+    labelGapMm: labelGapMm,
+    labelDensity: labelDensity,
+    labelSpeed: labelSpeed,
+    labelHomeBeforePrint: labelHomeBeforePrint,
+  );
 }
 
 /// 内置模板选择项，适合直接绑定到下拉框/设置页。
@@ -237,6 +243,11 @@ const builtInReceiptTemplateOptions = <ReceiptTemplateOption>[
   ReceiptTemplateOption(
     type: PrintJobType.label,
     paperSize: ReceiptPaperSize.mm58,
+    mode: ReceiptPrintMode.tsplRaster,
+  ),
+  ReceiptTemplateOption(
+    type: PrintJobType.label,
+    paperSize: ReceiptPaperSize.mm58,
   ),
 ];
 
@@ -289,24 +300,22 @@ class ReceiptTemplate {
     int? labelReferenceY,
     int? labelShiftDots,
     List<Map<String, Object?>>? elements,
-  }) =>
-      ReceiptTemplate(
-        width: width ?? this.width,
-        encoding: encoding ?? this.encoding,
-        fontFamily: fontFamily ?? this.fontFamily,
-        fontSize: fontSize ?? this.fontSize,
-        labelWidthMm: labelWidthMm ?? this.labelWidthMm,
-        labelHeightMm: labelHeightMm ?? this.labelHeightMm,
-        labelGapMm: labelGapMm ?? this.labelGapMm,
-        labelDensity: labelDensity ?? this.labelDensity,
-        labelSpeed: labelSpeed ?? this.labelSpeed,
-        labelHomeBeforePrint:
-            labelHomeBeforePrint ?? this.labelHomeBeforePrint,
-        labelReferenceX: labelReferenceX ?? this.labelReferenceX,
-        labelReferenceY: labelReferenceY ?? this.labelReferenceY,
-        labelShiftDots: labelShiftDots ?? this.labelShiftDots,
-        elements: elements ?? this.elements,
-      );
+  }) => ReceiptTemplate(
+    width: width ?? this.width,
+    encoding: encoding ?? this.encoding,
+    fontFamily: fontFamily ?? this.fontFamily,
+    fontSize: fontSize ?? this.fontSize,
+    labelWidthMm: labelWidthMm ?? this.labelWidthMm,
+    labelHeightMm: labelHeightMm ?? this.labelHeightMm,
+    labelGapMm: labelGapMm ?? this.labelGapMm,
+    labelDensity: labelDensity ?? this.labelDensity,
+    labelSpeed: labelSpeed ?? this.labelSpeed,
+    labelHomeBeforePrint: labelHomeBeforePrint ?? this.labelHomeBeforePrint,
+    labelReferenceX: labelReferenceX ?? this.labelReferenceX,
+    labelReferenceY: labelReferenceY ?? this.labelReferenceY,
+    labelShiftDots: labelShiftDots ?? this.labelShiftDots,
+    elements: elements ?? this.elements,
+  );
 
   factory ReceiptTemplate.fromJson(Map<String, dynamic> json) {
     return ReceiptTemplate(
@@ -1144,8 +1153,10 @@ ReceiptTemplate defaultTemplateForPrintJobType(
   bool? labelHomeBeforePrint,
 }) {
   final templateWidth = width ?? paperSize?.width;
-  if (type == PrintJobType.label && mode == ReceiptPrintMode.tsplImage) {
-    return defaultTsplLabelImageTemplate(
+  if (type == PrintJobType.label &&
+      (mode == ReceiptPrintMode.tsplImage ||
+          mode == ReceiptPrintMode.tsplRaster)) {
+    final template = defaultTsplLabelImageTemplate(
       width: templateWidth ?? ReceiptPaperSize.mm58.width,
       widthMm: _labelWidthMmForPaper(paperSize),
       heightMm: labelHeightMm ?? 40,
@@ -1156,6 +1167,9 @@ ReceiptTemplate defaultTemplateForPrintJobType(
       fontFamily: fontFamily,
       fontSize: fontSize,
     );
+    return mode == ReceiptPrintMode.tsplRaster
+        ? template.copyWith(encoding: ReceiptPrintMode.tsplRaster.encoding)
+        : template;
   }
 
   if (type == PrintJobType.label && mode == ReceiptPrintMode.tspl) {

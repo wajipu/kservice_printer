@@ -158,15 +158,21 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
 
   void _syncJsonControllers() {
     final template = _buildSelectedTemplate();
-    _templateJsonController.text = const JsonEncoder.withIndent('  ').convert(template.toJson());
-    _dataJsonController.text = const JsonEncoder.withIndent('  ').convert(_sampleData);
+    _templateJsonController.text = const JsonEncoder.withIndent(
+      '  ',
+    ).convert(template.toJson());
+    _dataJsonController.text = const JsonEncoder.withIndent(
+      '  ',
+    ).convert(_sampleData);
   }
 
   ReceiptTemplate _buildSelectedTemplate() {
     final base = _selectedTemplate.buildTemplate();
-    final isTspl = _selectedTemplate.type == PrintJobType.label &&
+    final isTspl =
+        _selectedTemplate.type == PrintJobType.label &&
         (_selectedTemplate.mode == ReceiptPrintMode.tspl ||
-            _selectedTemplate.mode == ReceiptPrintMode.tsplImage);
+            _selectedTemplate.mode == ReceiptPrintMode.tsplImage ||
+            _selectedTemplate.mode == ReceiptPrintMode.tsplRaster);
     if (!isTspl) return base;
     final height = double.tryParse(_labelHeightMmController.text.trim());
     final gap = double.tryParse(_labelGapMmController.text.trim());
@@ -794,7 +800,10 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
             ),
             items: [
               for (final option in builtInReceiptTemplateOptions)
-                DropdownMenuItem(value: option, child: Text(option.displayName)),
+                DropdownMenuItem(
+                  value: option,
+                  child: Text(option.displayName),
+                ),
             ],
             onChanged: _busy
                 ? null
@@ -814,17 +823,15 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
             ],
           ),
           const SizedBox(height: 12),
-          _InfoLine(
-            label: '模板编码',
-            value: _buildSelectedTemplate().encoding,
-          ),
+          _InfoLine(label: '模板编码', value: _buildSelectedTemplate().encoding),
           _InfoLine(
             label: '字符宽度',
             value: '${_buildSelectedTemplate().width} 列',
           ),
           if (_selectedTemplate.type == PrintJobType.label &&
               (_selectedTemplate.mode == ReceiptPrintMode.tspl ||
-                  _selectedTemplate.mode == ReceiptPrintMode.tsplImage)) ...[
+                  _selectedTemplate.mode == ReceiptPrintMode.tsplImage ||
+                  _selectedTemplate.mode == ReceiptPrintMode.tsplRaster)) ...[
             const SizedBox(height: 12),
             Text('标签参数', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 8),
@@ -978,8 +985,6 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
     }
     return int.tryParse(trimmed) ?? fallback ?? 0;
   }
-
-
 
   String _shortHex(String hex) {
     if (hex.length <= 160) {

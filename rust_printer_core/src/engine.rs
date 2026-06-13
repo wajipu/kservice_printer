@@ -685,6 +685,41 @@ mod tests {
         assert!(script.contains("HOME\r\nCLS\r\nBITMAP 0,0,58,320,0,"));
         assert!(script.ends_with("PRINT 1,1\r\n"));
         assert!(!bytes.starts_with(&[0x1b, 0x40]));
+
+        let header = b"BITMAP 0,0,58,320,0,";
+        let bitmap_start = bytes
+            .windows(header.len())
+            .position(|window| window == header)
+            .unwrap()
+            + header.len();
+        let bitmap_end = bitmap_start + 58 * 320;
+        assert!(bytes[bitmap_start..bitmap_end].iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn renders_tspl_image_text_as_bar_raster() {
+        let template = json!({
+            "width": 32,
+            "encoding": "tspl-raster",
+            "fontSize": 32,
+            "labelWidthMm": 58,
+            "labelHeightMm": 30,
+            "labelGapMm": 2,
+            "elements": [
+                {"type": "text", "value": "{{item.name}}", "align": "center", "bold": true}
+            ]
+        })
+        .to_string();
+        let data = json!({"item": {"name": "ABC-123"}}).to_string();
+
+        let result = render_receipt_inner(&template, &data).unwrap();
+        let bytes = hex::decode(result["bytes"].as_str().unwrap()).unwrap();
+        let script = String::from_utf8_lossy(&bytes);
+
+        assert!(script.starts_with("SIZE 58 mm,30 mm\r\n"));
+        assert!(script.contains("\r\nBAR "));
+        assert!(!script.contains("BITMAP"));
+        assert!(script.ends_with("PRINT 1,1\r\n"));
     }
 
     #[test]

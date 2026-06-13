@@ -43,8 +43,17 @@ pub(crate) fn is_tspl_image_template(template: &Template) -> bool {
         .replace(['-', '_'], "");
     matches!(
         normalized.as_str(),
-        "tsplimage" | "tsplbitmap" | "tscimage" | "tscbitmap"
+        "tsplimage" | "tsplraster" | "tsplbitmap" | "tscimage" | "tscraster" | "tscbitmap"
     )
+}
+
+fn is_tspl_raster_template(template: &Template) -> bool {
+    let normalized = template
+        .encoding
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '_'], "");
+    matches!(normalized.as_str(), "tsplraster" | "tscraster")
 }
 
 pub(crate) fn render_template_as_tspl_bytes(
@@ -73,6 +82,10 @@ pub(crate) fn render_template_as_tspl_image_bytes(
     let mut handlebars = Handlebars::new();
     handlebars.register_escape_fn(no_escape);
     let image = render_template_to_label_image(template, data, &handlebars)?;
+    if is_tspl_raster_template(template) {
+        return render_label_image_as_bar_raster(template, &image);
+    }
+
     let bitmap = pack_tspl_bitmap(&image);
     let width_bytes = image.width().div_ceil(8);
 
@@ -84,6 +97,17 @@ pub(crate) fn render_template_as_tspl_image_bytes(
     bytes.extend_from_slice(&bitmap);
     bytes.extend_from_slice(b"\r\nPRINT 1,1\r\n");
     Ok(bytes)
+}
+
+fn render_label_image_as_bar_raster(
+    template: &Template,
+    image: &GrayImage,
+) -> Result<Vec<u8>, PrinterError> {
+    let mut commands = tspl_setup_commands(template);
+    commands.extend(raster_bar_commands(image));
+    commands.push("PRINT 1,1".to_string());
+    let script = format!("{}\r\n", commands.join("\r\n"));
+    encode_printer_text(&script, "gbk")
 }
 
 // ---------- TSPL 指令生成 ----------
@@ -671,6 +695,71 @@ fn fill_rect(image: &mut GrayImage, x: i32, y: i32, width: i32, height: i32) {
             image.put_pixel(px as u32, py as u32, Luma([0]));
         }
     }
+}
+
+#[derive(Clone)]
+struct RasterRun {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn raster_bar_commands(image: &GrayImage) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut active: Vec<RasterRun> = Vec::new();
+
+    for y in 0..image.height() as i32 {
+        let runs = black_runs_for_row(image, y as u32);
+        let mut next = Vec::new();
+
+        for (x, width) in runs {
+            if let Some(index) = active
+                .iter()
+                .position(|run| run.x == x && run.width == width)
+            {
+                let mut run = active.swap_remove(index);
+                run.height += 1;
+                next.push(run);
+            } else {
+                next.push(RasterRun {
+                    x,
+                    y,
+                    width,
+                    height: 1,
+                });
+            }
+        }
+
+        for run in active {
+            commands.push(format!("BAR {},{},{},{}", run.x, run.y, run.width, run.height));
+        }
+        active = next;
+    }
+
+    for run in active {
+        commands.push(format!("BAR {},{},{},{}", run.x, run.y, run.width, run.height));
+    }
+    commands
+}
+
+fn black_runs_for_row(image: &GrayImage, y: u32) -> Vec<(i32, i32)> {
+    let mut runs = Vec::new();
+    let mut x = 0;
+    while x < image.width() {
+        while x < image.width() && image.get_pixel(x, y)[0] >= 160 {
+            x += 1;
+        }
+        if x >= image.width() {
+            break;
+        }
+        let start = x;
+        while x < image.width() && image.get_pixel(x, y)[0] < 160 {
+            x += 1;
+        }
+        runs.push((start as i32, (x - start) as i32));
+    }
+    runs
 }
 
 fn pack_tspl_bitmap(image: &GrayImage) -> Vec<u8> {
