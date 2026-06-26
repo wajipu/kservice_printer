@@ -107,6 +107,12 @@ enum ReceiptPrintMode {
 
   /// 将整张标签渲染成 TSPL BAR 栅格，适合不兼容二进制 BITMAP 的设备。
   tsplRaster,
+
+  /// 使用 ZPL 标签语言，适合 Zebra 兼容标签打印机。
+  zpl,
+
+  /// 将整张标签渲染成 ZPL ^GFA 位图，适合复杂文字和精确版式。
+  zplImage,
 }
 
 extension ReceiptPrintModeInfo on ReceiptPrintMode {
@@ -116,6 +122,8 @@ extension ReceiptPrintModeInfo on ReceiptPrintMode {
     ReceiptPrintMode.tspl => 'tspl',
     ReceiptPrintMode.tsplImage => 'tspl-image',
     ReceiptPrintMode.tsplRaster => 'tspl-raster',
+    ReceiptPrintMode.zpl => 'zpl',
+    ReceiptPrintMode.zplImage => 'zpl-image',
   };
 
   String get displayName => switch (this) {
@@ -124,6 +132,17 @@ extension ReceiptPrintModeInfo on ReceiptPrintMode {
     ReceiptPrintMode.tspl => 'TSPL 标签',
     ReceiptPrintMode.tsplImage => 'TSPL 图片标签',
     ReceiptPrintMode.tsplRaster => 'TSPL 兼容图片标签',
+    ReceiptPrintMode.zpl => 'ZPL 标签',
+    ReceiptPrintMode.zplImage => 'ZPL 图片标签',
+  };
+
+  bool get isLabelLanguage => switch (this) {
+    ReceiptPrintMode.tspl ||
+    ReceiptPrintMode.tsplImage ||
+    ReceiptPrintMode.tsplRaster ||
+    ReceiptPrintMode.zpl ||
+    ReceiptPrintMode.zplImage => true,
+    ReceiptPrintMode.text || ReceiptPrintMode.image => false,
   };
 }
 
@@ -153,10 +172,7 @@ class ReceiptTemplateOption {
   String get code => '${type.code}_${paperSize.name}_${mode.name}';
 
   String get paperDisplayName =>
-      type == PrintJobType.label &&
-          (mode == ReceiptPrintMode.tspl ||
-              mode == ReceiptPrintMode.tsplImage ||
-              mode == ReceiptPrintMode.tsplRaster)
+      type == PrintJobType.label && mode.isLabelLanguage
       ? switch (paperSize) {
           ReceiptPaperSize.mm58 => '58mm 标签',
           ReceiptPaperSize.mm80 => '80mm 标签',
@@ -244,6 +260,16 @@ const builtInReceiptTemplateOptions = <ReceiptTemplateOption>[
     type: PrintJobType.label,
     paperSize: ReceiptPaperSize.mm58,
     mode: ReceiptPrintMode.tsplRaster,
+  ),
+  ReceiptTemplateOption(
+    type: PrintJobType.label,
+    paperSize: ReceiptPaperSize.mm58,
+    mode: ReceiptPrintMode.zpl,
+  ),
+  ReceiptTemplateOption(
+    type: PrintJobType.label,
+    paperSize: ReceiptPaperSize.mm58,
+    mode: ReceiptPrintMode.zplImage,
   ),
   ReceiptTemplateOption(
     type: PrintJobType.label,
@@ -484,6 +510,21 @@ class PrintResult {
       error: json['error']?.toString(),
     );
   }
+}
+
+/// ESC/POS 钱箱脉冲引脚。
+enum CashDrawerPin { pin2, pin5 }
+
+extension CashDrawerPinInfo on CashDrawerPin {
+  int get code => switch (this) {
+    CashDrawerPin.pin2 => 0,
+    CashDrawerPin.pin5 => 1,
+  };
+
+  String get displayName => switch (this) {
+    CashDrawerPin.pin2 => 'Pin 2',
+    CashDrawerPin.pin5 => 'Pin 5',
+  };
 }
 
 /// 多打印机分发后的单台打印机结果。
@@ -964,6 +1005,46 @@ Future<PrintResult> printReceiptNow(PrintJob job) async {
   return PrintResult.fromJson(jsonDecode(response) as Map<String, dynamic>);
 }
 
+/// 打开连接在打印机上的钱箱。
+///
+/// 大多数 ESC/POS 设备使用 [CashDrawerPin.pin2]；少数设备接在 pin5。
+/// 默认会按打印机连接自动排队，避免和正在进行的打印任务并发写入。
+Future<PrintResult> openCashDrawer(
+  PrinterConnection connection, {
+  CashDrawerPin pin = CashDrawerPin.pin2,
+  Duration on = const Duration(milliseconds: 200),
+  Duration off = const Duration(milliseconds: 200),
+  bool queued = true,
+}) {
+  if (!queued) {
+    return openCashDrawerNow(connection, pin: pin, on: on, off: off);
+  }
+  return _printQueue.enqueue(
+    connection.queueKey,
+    () => openCashDrawerNow(connection, pin: pin, on: on, off: off),
+  );
+}
+
+/// 立即发送开钱箱脉冲，不经过 Dart 队列。
+Future<PrintResult> openCashDrawerNow(
+  PrinterConnection connection, {
+  CashDrawerPin pin = CashDrawerPin.pin2,
+  Duration on = const Duration(milliseconds: 200),
+  Duration off = const Duration(milliseconds: 200),
+}) async {
+  await initKservicePrinter();
+  final response = await rust_printer.openCashDrawer(
+    connection: connection,
+    pin: pin.code,
+    onMs: _cashDrawerDurationMs(on),
+    offMs: _cashDrawerDurationMs(off),
+  );
+  return PrintResult.fromJson(jsonDecode(response) as Map<String, dynamic>);
+}
+
+int _cashDrawerDurationMs(Duration duration) =>
+    duration.inMilliseconds.clamp(0, 510).toInt();
+
 /// 将“生成打印任务 + 打印”作为一个整体放进队列。
 ///
 /// 图片小票建议使用这个入口，把 Flutter 生成 PNG/base64 的逻辑放在 [buildJob]
@@ -1153,6 +1234,32 @@ ReceiptTemplate defaultTemplateForPrintJobType(
   bool? labelHomeBeforePrint,
 }) {
   final templateWidth = width ?? paperSize?.width;
+  if (type == PrintJobType.label && mode == ReceiptPrintMode.zplImage) {
+    return defaultZplLabelImageTemplate(
+      width: templateWidth ?? ReceiptPaperSize.mm58.width,
+      widthMm: _labelWidthMmForPaper(paperSize),
+      heightMm: labelHeightMm ?? 40,
+      gapMm: labelGapMm ?? 2,
+      density: labelDensity ?? 8,
+      speed: labelSpeed ?? 4,
+      homeBeforePrint: labelHomeBeforePrint ?? true,
+      fontFamily: fontFamily,
+      fontSize: fontSize,
+    );
+  }
+
+  if (type == PrintJobType.label && mode == ReceiptPrintMode.zpl) {
+    return defaultZplLabelTemplate(
+      width: templateWidth ?? ReceiptPaperSize.mm58.width,
+      widthMm: _labelWidthMmForPaper(paperSize),
+      heightMm: labelHeightMm ?? 40,
+      gapMm: labelGapMm ?? 2,
+      density: labelDensity ?? 8,
+      speed: labelSpeed ?? 4,
+      homeBeforePrint: labelHomeBeforePrint ?? true,
+    );
+  }
+
   if (type == PrintJobType.label &&
       (mode == ReceiptPrintMode.tsplImage ||
           mode == ReceiptPrintMode.tsplRaster)) {
@@ -1383,6 +1490,36 @@ extension ReceiptTemplateMode on ReceiptTemplate {
       elements: elements,
     );
   }
+
+  /// 将现有模板改成 ZPL 标签语言输出。
+  ReceiptTemplate asZplLabelTemplate({
+    double widthMm = 58,
+    double heightMm = 40,
+    double gapMm = 2,
+    int density = 8,
+    int speed = 4,
+    bool homeBeforePrint = true,
+    int? referenceX,
+    int? referenceY,
+    int? shiftDots,
+  }) {
+    return ReceiptTemplate(
+      width: width,
+      encoding: ReceiptPrintMode.zpl.encoding,
+      fontFamily: fontFamily,
+      fontSize: fontSize,
+      labelWidthMm: widthMm,
+      labelHeightMm: heightMm,
+      labelGapMm: gapMm,
+      labelDensity: density,
+      labelSpeed: speed,
+      labelHomeBeforePrint: homeBeforePrint,
+      labelReferenceX: referenceX,
+      labelReferenceY: referenceY,
+      labelShiftDots: shiftDots,
+      elements: elements,
+    );
+  }
 }
 
 /// 后厨制作单模板。
@@ -1576,4 +1713,62 @@ ReceiptTemplate defaultTsplLabelImageTemplate({
     labelShiftDots: template.labelShiftDots,
     elements: template.elements,
   );
+}
+
+/// ZPL 标签打印模板，适合 Zebra 兼容标签机。
+ReceiptTemplate defaultZplLabelTemplate({
+  int width = 32,
+  double widthMm = 58,
+  double heightMm = 40,
+  double gapMm = 2,
+  int density = 8,
+  int speed = 4,
+  bool homeBeforePrint = true,
+  int? referenceX,
+  int? referenceY,
+  int? shiftDots,
+}) {
+  return defaultTsplLabelTemplate(
+    width: width,
+    widthMm: widthMm,
+    heightMm: heightMm,
+    gapMm: gapMm,
+    density: density,
+    speed: speed,
+    homeBeforePrint: homeBeforePrint,
+    referenceX: referenceX,
+    referenceY: referenceY,
+    shiftDots: shiftDots,
+  ).copyWith(encoding: ReceiptPrintMode.zpl.encoding);
+}
+
+/// ZPL 图片标签模板。
+ReceiptTemplate defaultZplLabelImageTemplate({
+  int width = 32,
+  double widthMm = 58,
+  double heightMm = 40,
+  double gapMm = 2,
+  int density = 8,
+  int speed = 4,
+  String? fontFamily,
+  double? fontSize,
+  bool homeBeforePrint = true,
+  int? referenceX,
+  int? referenceY,
+  int? shiftDots,
+}) {
+  return defaultTsplLabelImageTemplate(
+    width: width,
+    widthMm: widthMm,
+    heightMm: heightMm,
+    gapMm: gapMm,
+    density: density,
+    speed: speed,
+    fontFamily: fontFamily,
+    fontSize: fontSize,
+    homeBeforePrint: homeBeforePrint,
+    referenceX: referenceX,
+    referenceY: referenceY,
+    shiftDots: shiftDots,
+  ).copyWith(encoding: ReceiptPrintMode.zplImage.encoding);
 }

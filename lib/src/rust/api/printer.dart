@@ -26,6 +26,18 @@ Future<String> renderReceipt({
   dataJson: dataJson,
 );
 
+Future<String> openCashDrawer({
+  required PrinterConnection connection,
+  required int pin,
+  required int onMs,
+  required int offMs,
+}) => RustLib.instance.api.crateApiPrinterOpenCashDrawer(
+  connection: connection,
+  pin: pin,
+  onMs: onMs,
+  offMs: offMs,
+);
+
 Future<String> listUsbPrinters() =>
     RustLib.instance.api.crateApiPrinterListUsbPrinters();
 

@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 1501291080;
+  int get rustContentHash => 1665776270;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -86,6 +86,13 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiPrinterInitApp();
 
   Future<String> crateApiPrinterListUsbPrinters();
+
+  Future<String> crateApiPrinterOpenCashDrawer({
+    required PrinterConnection connection,
+    required int pin,
+    required int onMs,
+    required int offMs,
+  });
 
   Future<String> crateApiPrinterPrintReceipt({
     required PrinterConnection connection,
@@ -197,6 +204,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "list_usb_printers", argNames: []);
 
   @override
+  Future<String> crateApiPrinterOpenCashDrawer({
+    required PrinterConnection connection,
+    required int pin,
+    required int onMs,
+    required int offMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_printer_connection(connection, serializer);
+          sse_encode_u_8(pin, serializer);
+          sse_encode_u_16(onMs, serializer);
+          sse_encode_u_16(offMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiPrinterOpenCashDrawerConstMeta,
+        argValues: [connection, pin, onMs, offMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiPrinterOpenCashDrawerConstMeta =>
+      const TaskConstMeta(
+        debugName: "open_cash_drawer",
+        argNames: ["connection", "pin", "onMs", "offMs"],
+      );
+
+  @override
   Future<String> crateApiPrinterPrintReceipt({
     required PrinterConnection connection,
     required String templateJson,
@@ -212,7 +258,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -247,7 +293,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },

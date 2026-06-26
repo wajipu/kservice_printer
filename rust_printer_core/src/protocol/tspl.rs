@@ -86,7 +86,7 @@ pub(crate) fn render_template_as_tspl_image_bytes(
         return render_label_image_as_bar_raster(template, &image);
     }
 
-    let bitmap = pack_tspl_bitmap(&image);
+    let bitmap = pack_label_bitmap(&image);
     let width_bytes = image.width().div_ceil(8);
 
     let mut bytes = encode_printer_text(
@@ -340,7 +340,7 @@ fn render_tspl_element(
 
 // ---------- 标签图片渲染（tspl-image/bitmap） ----------
 
-fn render_template_to_label_image(
+pub(crate) fn render_template_to_label_image(
     template: &Template,
     data: &Value,
     handlebars: &Handlebars,
@@ -355,28 +355,39 @@ fn render_template_to_label_image(
     font_system.db_mut().load_system_fonts();
     let mut swash_cache = SwashCache::new();
 
-    render_tspl_image_elements(
-        &mut image,
-        &mut y,
-        &template.elements,
-        data,
+    let mut context = LabelImageRenderContext {
+        image: &mut image,
+        y: &mut y,
         handlebars,
         template,
-        &mut font_system,
-        &mut swash_cache,
-    )?;
+        font_system: &mut font_system,
+        swash_cache: &mut swash_cache,
+    };
+    render_tspl_image_elements(&mut context, &template.elements, data)?;
     Ok(image)
 }
 
+struct LabelImageRenderContext<'a, 'reg> {
+    image: &'a mut GrayImage,
+    y: &'a mut i32,
+    handlebars: &'a Handlebars<'reg>,
+    template: &'a Template,
+    font_system: &'a mut FontSystem,
+    swash_cache: &'a mut SwashCache,
+}
+
+impl LabelImageRenderContext<'_, '_> {
+    fn content_width(&self) -> u32 {
+        self.image
+            .width()
+            .saturating_sub((TSPL_MARGIN_X * 2) as u32)
+    }
+}
+
 fn render_tspl_image_elements(
-    image: &mut GrayImage,
-    y: &mut i32,
+    context: &mut LabelImageRenderContext<'_, '_>,
     elements: &[Element],
     data: &Value,
-    handlebars: &Handlebars,
-    template: &Template,
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
 ) -> Result<(), PrinterError> {
     for element in elements {
         match element {
@@ -386,106 +397,115 @@ fn render_tspl_image_elements(
                 bold,
                 size,
             } => {
-                let text = render_value(handlebars, value, data)?;
+                let text = render_value(context.handlebars, value, data)?;
                 let font_size = if matches!(size, TextSize::Double) {
-                    template.font_size.unwrap_or(44.0).max(28.0)
+                    context.template.font_size.unwrap_or(44.0).max(28.0)
                 } else {
-                    template.font_size.unwrap_or(26.0)
+                    context.template.font_size.unwrap_or(26.0)
                 };
                 let line_height = (font_size * 1.25).ceil() as i32;
                 for line in text.lines() {
                     let line = line.trim();
                     if line.is_empty() {
-                        *y += line_height;
+                        *context.y += line_height;
                         continue;
                     }
+                    let y = *context.y;
+                    let width = context.content_width();
+                    let font_family = context.template.font_family.clone();
                     draw_label_text(
-                        image,
+                        context.image,
                         line,
                         LabelTextSpec {
                             x: TSPL_MARGIN_X,
-                            y: *y,
-                            width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
+                            y,
+                            width,
                             font_size,
                             align: *align,
                             bold: *bold,
-                            font_family: template.font_family.as_deref(),
+                            font_family: font_family.as_deref(),
                         },
-                        font_system,
-                        swash_cache,
+                        context.font_system,
+                        context.swash_cache,
                     );
-                    *y += line_height;
+                    *context.y += line_height;
                 }
             }
             Element::Row { left, right, bold } => {
-                let left = render_value(handlebars, left, data)?;
-                let right = render_value(handlebars, right, data)?;
-                let font_size = template.font_size.unwrap_or(24.0);
+                let left = render_value(context.handlebars, left, data)?;
+                let right = render_value(context.handlebars, right, data)?;
+                let font_size = context.template.font_size.unwrap_or(24.0);
                 let line_height = (font_size * 1.35).ceil() as i32;
+                let y = *context.y;
+                let width = context.content_width();
+                let font_family = context.template.font_family.clone();
                 draw_label_text(
-                    image,
+                    context.image,
                     &left,
                     LabelTextSpec {
                         x: TSPL_MARGIN_X,
-                        y: *y,
-                        width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
+                        y,
+                        width,
                         font_size,
                         align: Align::Left,
                         bold: *bold,
-                        font_family: template.font_family.as_deref(),
+                        font_family: font_family.as_deref(),
                     },
-                    font_system,
-                    swash_cache,
+                    context.font_system,
+                    context.swash_cache,
                 );
                 draw_label_text(
-                    image,
+                    context.image,
                     &right,
                     LabelTextSpec {
                         x: TSPL_MARGIN_X,
-                        y: *y,
-                        width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
+                        y,
+                        width,
                         font_size,
                         align: Align::Right,
                         bold: *bold,
-                        font_family: template.font_family.as_deref(),
+                        font_family: font_family.as_deref(),
                     },
-                    font_system,
-                    swash_cache,
+                    context.font_system,
+                    context.swash_cache,
                 );
-                *y += line_height;
+                *context.y += line_height;
             }
             Element::Columns { columns } => {
                 let mut items = Vec::new();
                 let bold = columns.iter().any(|col| col.bold);
                 for col in columns {
-                    let value = render_value(handlebars, &col.value, data)?;
+                    let value = render_value(context.handlebars, &col.value, data)?;
                     items.push((value, col.width, col.align));
                 }
                 for line in format_columns(&items) {
+                    let y = *context.y;
+                    let width = context.content_width();
+                    let font_family = context.template.font_family.clone();
                     draw_label_text(
-                        image,
+                        context.image,
                         &line,
                         LabelTextSpec {
                             x: TSPL_MARGIN_X,
-                            y: *y,
-                            width: image.width().saturating_sub((TSPL_MARGIN_X * 2) as u32),
-                            font_size: template.font_size.unwrap_or(24.0),
+                            y,
+                            width,
+                            font_size: context.template.font_size.unwrap_or(24.0),
                             align: Align::Left,
                             bold,
-                            font_family: template.font_family.as_deref(),
+                            font_family: font_family.as_deref(),
                         },
-                        font_system,
-                        swash_cache,
+                        context.font_system,
+                        context.swash_cache,
                     );
-                    *y += TSPL_TEXT_LINE_HEIGHT;
+                    *context.y += TSPL_TEXT_LINE_HEIGHT;
                 }
             }
             Element::Divider { .. } => {
-                draw_horizontal_bar(image, TSPL_MARGIN_X, *y, 2);
-                *y += 12;
+                draw_horizontal_bar(context.image, TSPL_MARGIN_X, *context.y, 2);
+                *context.y += 12;
             }
             Element::Feed { lines } => {
-                *y += i32::from(*lines) * TSPL_TEXT_LINE_HEIGHT;
+                *context.y += i32::from(*lines) * TSPL_TEXT_LINE_HEIGHT;
             }
             Element::Cut
             | Element::Raw { .. }
@@ -494,7 +514,7 @@ fn render_tspl_image_elements(
             Element::Repeat { path, elements } => {
                 if let Some(Value::Array(items)) = value_ref(data, path) {
                     for item in items {
-                        render_tspl_image_elements(image, y, elements, item, handlebars, template, font_system, swash_cache)?;
+                        render_tspl_image_elements(context, elements, item)?;
                     }
                 }
             }
@@ -505,8 +525,16 @@ fn render_tspl_image_elements(
                 x,
                 y: fixed_y,
             } => {
-                let value = render_value(handlebars, value, data)?;
-                draw_qr_code_on_label(image, &value, *size, *align, *x, *fixed_y, y)?;
+                let value = render_value(context.handlebars, value, data)?;
+                draw_qr_code_on_label(
+                    context.image,
+                    &value,
+                    *size,
+                    *align,
+                    *x,
+                    *fixed_y,
+                    context.y,
+                )?;
             }
         }
     }
@@ -732,13 +760,19 @@ fn raster_bar_commands(image: &GrayImage) -> Vec<String> {
         }
 
         for run in active {
-            commands.push(format!("BAR {},{},{},{}", run.x, run.y, run.width, run.height));
+            commands.push(format!(
+                "BAR {},{},{},{}",
+                run.x, run.y, run.width, run.height
+            ));
         }
         active = next;
     }
 
     for run in active {
-        commands.push(format!("BAR {},{},{},{}", run.x, run.y, run.width, run.height));
+        commands.push(format!(
+            "BAR {},{},{},{}",
+            run.x, run.y, run.width, run.height
+        ));
     }
     commands
 }
@@ -762,7 +796,7 @@ fn black_runs_for_row(image: &GrayImage, y: u32) -> Vec<(i32, i32)> {
     runs
 }
 
-fn pack_tspl_bitmap(image: &GrayImage) -> Vec<u8> {
+pub(crate) fn pack_label_bitmap(image: &GrayImage) -> Vec<u8> {
     let width_bytes = image.width().div_ceil(8);
     let mut bytes = Vec::with_capacity((width_bytes * image.height()) as usize);
     for y in 0..image.height() {

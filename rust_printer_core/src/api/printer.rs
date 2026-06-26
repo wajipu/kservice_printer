@@ -33,6 +33,10 @@ pub fn render_receipt(template_json: String, data_json: String) -> String {
     engine::render_receipt(&template_json, &data_json)
 }
 
+pub fn open_cash_drawer(connection: PrinterConnection, pin: u8, on_ms: u16, off_ms: u16) -> String {
+    engine::open_cash_drawer(&connection, pin, on_ms, off_ms)
+}
+
 pub fn list_usb_printers() -> String {
     engine::list_usb_printers()
 }

@@ -126,6 +126,41 @@ void main() {
     expect(template.elements.last['type'], 'qrcode');
   });
 
+  test('builds ZPL label template for Zebra compatible printers', () {
+    final template = defaultTemplateForPrintJobType(
+      PrintJobType.label,
+      paperSize: ReceiptPaperSize.mm58,
+      mode: ReceiptPrintMode.zpl,
+    );
+
+    expect(template.width, 32);
+    expect(template.encoding, 'zpl');
+    expect(template.labelWidthMm, 58);
+    expect(template.labelHeightMm, 40);
+    expect(template.labelGapMm, 2);
+    expect(template.labelHomeBeforePrint, isTrue);
+    expect(template.elements.first['value'], '{{item.name}}');
+    expect(template.elements.last['type'], 'qrcode');
+  });
+
+  test('builds ZPL image label template for complex scripts', () {
+    final template = defaultTemplateForPrintJobType(
+      PrintJobType.label,
+      paperSize: ReceiptPaperSize.mm58,
+      mode: ReceiptPrintMode.zplImage,
+      fontFamily: 'Noto Sans Arabic',
+      fontSize: 24,
+    );
+
+    expect(template.width, 32);
+    expect(template.encoding, 'zpl-image');
+    expect(template.fontFamily, 'Noto Sans Arabic');
+    expect(template.fontSize, 24);
+    expect(template.labelWidthMm, 58);
+    expect(template.labelHeightMm, 40);
+    expect(template.elements.last['type'], 'qrcode');
+  });
+
   test('builds templates for 58mm and 80mm receipt paper', () {
     final template58 = defaultTemplateForPrintJobType(
       PrintJobType.receipt,
@@ -226,6 +261,8 @@ void main() {
         '后厨打印 · 80mm 小票 · 文本打印',
         '标签打印 · 58mm 标签 · TSPL 标签',
         '标签打印 · 58mm 标签 · TSPL 图片标签',
+        '标签打印 · 58mm 标签 · ZPL 标签',
+        '标签打印 · 58mm 标签 · ZPL 图片标签',
       ]),
     );
 
@@ -503,6 +540,32 @@ void main() {
     expect(_fakeRustApi.maxActiveByKey[connection.queueKey], 1);
   });
 
+  test('cash drawer command uses printer queue and pulse settings', () async {
+    final connection = const PrinterConnection.network(
+      host: '127.0.0.1',
+      port: 9100,
+      timeoutMs: 1000,
+    );
+
+    final result = await openCashDrawer(
+      connection,
+      pin: CashDrawerPin.pin5,
+      on: const Duration(milliseconds: 120),
+      off: const Duration(milliseconds: 260),
+    );
+
+    expect(result.ok, isTrue);
+    expect(result.bytes, 5);
+    expect(_fakeRustApi.drawerCalls, hasLength(1));
+    expect(_fakeRustApi.drawerCalls.single, {
+      'key': connection.queueKey,
+      'pin': 1,
+      'onMs': 120,
+      'offMs': 260,
+    });
+    expect(_fakeRustApi.maxActiveByKey[connection.queueKey], 1);
+  });
+
   test('print queue allows different printers to run concurrently', () async {
     final template = const ReceiptTemplate(elements: []);
     final firstConnection = const PrinterConnection.network(
@@ -643,6 +706,7 @@ void main() {
 
 class _FakeRustApi extends RustLibApi {
   final startedJobIds = <String>[];
+  final drawerCalls = <Map<String, Object?>>[];
   final failedQueueKeys = <String>{};
   final maxActiveByKey = <String, int>{};
   final _activeByKey = <String, int>{};
@@ -655,6 +719,7 @@ class _FakeRustApi extends RustLibApi {
 
   void reset() {
     startedJobIds.clear();
+    drawerCalls.clear();
     failedQueueKeys.clear();
     maxActiveByKey.clear();
     _activeByKey.clear();
@@ -699,6 +764,38 @@ class _FakeRustApi extends RustLibApi {
       'ok': true,
       'result': {'printers': usbPrinters},
     });
+  }
+
+  @override
+  Future<String> crateApiPrinterOpenCashDrawer({
+    required PrinterConnection connection,
+    required int pin,
+    required int onMs,
+    required int offMs,
+  }) async {
+    final key = connection.queueKey;
+    drawerCalls.add({'key': key, 'pin': pin, 'onMs': onMs, 'offMs': offMs});
+    _activeByKey[key] = (_activeByKey[key] ?? 0) + 1;
+    maxActiveByKey[key] = math.max(
+      maxActiveByKey[key] ?? 0,
+      _activeByKey[key] ?? 0,
+    );
+    _activeTotal += 1;
+    maxActiveTotal = math.max(maxActiveTotal, _activeTotal);
+
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      if (failedQueueKeys.contains(key)) {
+        return jsonEncode({'ok': false, 'error': 'offline'});
+      }
+      return jsonEncode({
+        'ok': true,
+        'result': {'printed': true, 'bytes': 5},
+      });
+    } finally {
+      _activeByKey[key] = (_activeByKey[key] ?? 1) - 1;
+      _activeTotal -= 1;
+    }
   }
 
   @override

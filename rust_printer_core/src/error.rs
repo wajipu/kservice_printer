@@ -27,6 +27,8 @@ pub enum PrinterError {
     InvalidRawHex(String),
     #[error("网络发现失败: {0}")]
     Discovery(String),
+    #[error("钱箱控制失败: {0}")]
+    CashDrawer(String),
     #[error("ESC/POS 驱动错误: {0}")]
     Escpos(String),
     #[error("连接打印机失败: {0}")]

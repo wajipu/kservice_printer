@@ -168,12 +168,10 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
 
   ReceiptTemplate _buildSelectedTemplate() {
     final base = _selectedTemplate.buildTemplate();
-    final isTspl =
+    final isLabelLanguage =
         _selectedTemplate.type == PrintJobType.label &&
-        (_selectedTemplate.mode == ReceiptPrintMode.tspl ||
-            _selectedTemplate.mode == ReceiptPrintMode.tsplImage ||
-            _selectedTemplate.mode == ReceiptPrintMode.tsplRaster);
-    if (!isTspl) return base;
+        _selectedTemplate.mode.isLabelLanguage;
+    if (!isLabelLanguage) return base;
     final height = double.tryParse(_labelHeightMmController.text.trim());
     final gap = double.tryParse(_labelGapMmController.text.trim());
     final density = int.tryParse(_labelDensityController.text.trim());
@@ -233,6 +231,21 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
                 '${result.bytes} bytes\n队列数：$activePrintQueueCount',
               )
             : _ActionResult('打印失败', result.error ?? '未知错误');
+      },
+    );
+  }
+
+  Future<void> _openCashDrawer() async {
+    await _runAction(
+      running: '正在发送开钱箱指令...',
+      action: () async {
+        final result = await openCashDrawer(_connection);
+        return result.ok
+            ? _ActionResult(
+                '钱箱指令已发送',
+                '${result.bytes} bytes\n队列数：$activePrintQueueCount',
+              )
+            : _ActionResult('钱箱控制失败', result.error ?? '未知错误');
       },
     );
   }
@@ -829,9 +842,7 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
             value: '${_buildSelectedTemplate().width} 列',
           ),
           if (_selectedTemplate.type == PrintJobType.label &&
-              (_selectedTemplate.mode == ReceiptPrintMode.tspl ||
-                  _selectedTemplate.mode == ReceiptPrintMode.tsplImage ||
-                  _selectedTemplate.mode == ReceiptPrintMode.tsplRaster)) ...[
+              _selectedTemplate.mode.isLabelLanguage) ...[
             const SizedBox(height: 12),
             Text('标签参数', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 8),
@@ -903,6 +914,11 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
           onPressed: _busy ? null : () => _print(queued: false),
           icon: const Icon(Icons.flash_on),
           label: const Text('直接打印'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _openCashDrawer,
+          icon: const Icon(Icons.point_of_sale),
+          label: const Text('打开钱箱'),
         ),
       ],
     );

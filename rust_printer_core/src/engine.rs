@@ -25,7 +25,7 @@ use std::time::Duration;
 use crate::api::printer::PrinterConnection;
 use crate::discovery::{discover_network_printers_inner, list_usb_printers_inner};
 use crate::error::PrinterError;
-use crate::protocol::tspl;
+use crate::protocol::{tspl, zpl};
 use crate::render::encoding::{encode_printer_text, normalize_text_for_encoding};
 use crate::render::image::{
     decode_image_base64, image_bit_option, image_bytes_bit_option, render_template_as_image,
@@ -176,6 +176,15 @@ pub fn render_receipt(template_json: &str, data_json: &str) -> String {
     into_response(render_receipt_inner(template_json, data_json))
 }
 
+pub fn open_cash_drawer(
+    connection: &PrinterConnection,
+    pin: u8,
+    on_ms: u16,
+    off_ms: u16,
+) -> String {
+    into_response(open_cash_drawer_inner(connection, pin, on_ms, off_ms))
+}
+
 pub fn list_usb_printers() -> String {
     into_response(list_usb_printers_inner())
 }
@@ -194,6 +203,24 @@ fn print_receipt_inner(
     let template = parse_template(template_json)?;
     let data: Value =
         serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
+    if zpl::is_zpl_image_template(&template) {
+        let bytes = zpl::render_template_as_zpl_image_bytes(&template, &data)?;
+        let (driver, written) = CountingDriver::new(open_driver(connection)?);
+        driver.write(&bytes)?;
+        driver.flush()?;
+        let bytes = *written.lock().unwrap();
+        return Ok(json!({ "printed": true, "bytes": bytes }));
+    }
+
+    if zpl::is_zpl_template(&template) {
+        let bytes = zpl::render_template_as_zpl_bytes(&template, &data)?;
+        let (driver, written) = CountingDriver::new(open_driver(connection)?);
+        driver.write(&bytes)?;
+        driver.flush()?;
+        let bytes = *written.lock().unwrap();
+        return Ok(json!({ "printed": true, "bytes": bytes }));
+    }
+
     if tspl::is_tspl_image_template(&template) {
         let bytes = tspl::render_template_as_tspl_image_bytes(&template, &data)?;
         let (driver, written) = CountingDriver::new(open_driver(connection)?);
@@ -223,6 +250,16 @@ fn render_receipt_inner(template_json: &str, data_json: &str) -> Result<Value, P
     let template = parse_template(template_json)?;
     let data: Value =
         serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
+    if zpl::is_zpl_image_template(&template) {
+        let bytes = zpl::render_template_as_zpl_image_bytes(&template, &data)?;
+        return Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }));
+    }
+
+    if zpl::is_zpl_template(&template) {
+        let bytes = zpl::render_template_as_zpl_bytes(&template, &data)?;
+        return Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }));
+    }
+
     if tspl::is_tspl_image_template(&template) {
         let bytes = tspl::render_template_as_tspl_image_bytes(&template, &data)?;
         return Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }));
@@ -238,6 +275,39 @@ fn render_receipt_inner(template_json: &str, data_json: &str) -> Result<Value, P
     printer.print()?;
     let bytes = buf.lock().unwrap().clone();
     Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }))
+}
+
+fn open_cash_drawer_inner(
+    connection: &PrinterConnection,
+    pin: u8,
+    on_ms: u16,
+    off_ms: u16,
+) -> Result<Value, PrinterError> {
+    let bytes = cash_drawer_pulse_command(pin, on_ms, off_ms)?;
+    let (driver, written) = CountingDriver::new(open_driver(connection)?);
+    driver.write(&bytes)?;
+    driver.flush()?;
+    let bytes = *written.lock().unwrap();
+    Ok(json!({ "printed": true, "bytes": bytes }))
+}
+
+fn cash_drawer_pulse_command(pin: u8, on_ms: u16, off_ms: u16) -> Result<[u8; 5], PrinterError> {
+    if pin > 1 {
+        return Err(PrinterError::CashDrawer(format!(
+            "钱箱引脚只能是 0(pin2) 或 1(pin5)，当前为 {pin}"
+        )));
+    }
+    Ok([
+        0x1b,
+        b'p',
+        pin,
+        cash_drawer_duration_units(on_ms),
+        cash_drawer_duration_units(off_ms),
+    ])
+}
+
+fn cash_drawer_duration_units(ms: u16) -> u8 {
+    u32::from(ms).div_ceil(2).clamp(0, u32::from(u8::MAX)) as u8
 }
 
 fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError> {
@@ -693,7 +763,9 @@ mod tests {
             .unwrap()
             + header.len();
         let bitmap_end = bitmap_start + 58 * 320;
-        assert!(bytes[bitmap_start..bitmap_end].iter().any(|byte| *byte != 0));
+        assert!(bytes[bitmap_start..bitmap_end]
+            .iter()
+            .any(|byte| *byte != 0));
     }
 
     #[test]
@@ -720,6 +792,90 @@ mod tests {
         assert!(script.contains("\r\nBAR "));
         assert!(!script.contains("BITMAP"));
         assert!(script.ends_with("PRINT 1,1\r\n"));
+    }
+
+    #[test]
+    fn renders_zpl_label_template_without_escpos_commands() {
+        let template = json!({
+            "width": 32,
+            "encoding": "zpl",
+            "labelWidthMm": 58,
+            "labelHeightMm": 40,
+            "labelDensity": 8,
+            "labelSpeed": 4,
+            "labelReferenceX": 8,
+            "labelReferenceY": 12,
+            "labelShiftDots": -4,
+            "elements": [
+                {"type": "text", "value": "{{item.name}}", "align": "center", "bold": true, "size": "double"},
+                {"type": "divider"},
+                {"type": "row", "left": "SKU", "right": "{{item.sku}}"},
+                {"type": "qrcode", "value": "{{item.sku}}", "size": 3, "x": 320, "y": 210}
+            ]
+        })
+        .to_string();
+        let data = json!({
+            "item": {"name": "Beef Rice", "sku": "BEEF-001"}
+        })
+        .to_string();
+
+        let result = render_receipt_inner(&template, &data).unwrap();
+        let bytes = hex::decode(result["bytes"].as_str().unwrap()).unwrap();
+        let script = String::from_utf8_lossy(&bytes);
+
+        assert!(script.starts_with("^XA\n"));
+        assert!(script.contains("^CI28\n"));
+        assert!(script.contains("^PW464\n"));
+        assert!(script.contains("^LL320\n"));
+        assert!(script.contains("^LH8,12\n"));
+        assert!(script.contains("^MD8\n"));
+        assert!(script.contains("^PR4\n"));
+        assert!(script.contains("^LS-4\n"));
+        assert!(script.contains("^A0N,56,60"));
+        assert!(script.contains("SKU"));
+        assert!(script.contains("^FO320,210^BQN,2,3^FH\\^FDLA,BEEF-001^FS"));
+        assert!(script.ends_with("^XZ\n"));
+        assert!(!bytes.starts_with(&[0x1b, 0x40]));
+    }
+
+    #[test]
+    fn renders_zpl_image_label_as_gfa_command() {
+        let template = json!({
+            "width": 32,
+            "encoding": "zpl-image",
+            "fontSize": 24,
+            "labelWidthMm": 58,
+            "labelHeightMm": 30,
+            "labelDensity": 8,
+            "labelSpeed": 4,
+            "elements": [
+                {"type": "text", "value": "{{item.name}}", "align": "center", "bold": true}
+            ]
+        })
+        .to_string();
+        let data = json!({"item": {"name": "ABC-123"}}).to_string();
+
+        let result = render_receipt_inner(&template, &data).unwrap();
+        let bytes = hex::decode(result["bytes"].as_str().unwrap()).unwrap();
+        let script = String::from_utf8_lossy(&bytes);
+
+        assert!(script.starts_with("^XA\n"));
+        assert!(script.contains("^PW464\n"));
+        assert!(script.contains("^LL240\n"));
+        assert!(script.contains("^FO0,0^GFA,13920,13920,58,"));
+        assert!(script.ends_with("^XZ\n"));
+        assert!(!bytes.starts_with(&[0x1b, 0x40]));
+    }
+
+    #[test]
+    fn builds_cash_drawer_pulse_command() {
+        let command = cash_drawer_pulse_command(0, 200, 400).unwrap();
+
+        assert_eq!(command, [0x1b, b'p', 0, 100, 200]);
+        assert!(matches!(
+            cash_drawer_pulse_command(2, 200, 200),
+            Err(PrinterError::CashDrawer(_))
+        ));
     }
 
     #[test]
