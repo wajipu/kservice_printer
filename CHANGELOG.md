@@ -1,3 +1,10 @@
+## 0.0.6
+
+* Add queued ESC/POS printer status queries with raw status bytes.
+* Add ESC/POS printer identity and serial number retrieval helpers.
+* Add Dart concurrent printer stress testing utilities and example app controls.
+* Set TCP read timeouts for bidirectional printer commands to avoid hanging status reads.
+
 ## 0.0.5
 
 * Add ZPL and ZPL image label printing for Zebra-compatible label printers.

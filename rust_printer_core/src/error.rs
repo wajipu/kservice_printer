@@ -29,6 +29,8 @@ pub enum PrinterError {
     Discovery(String),
     #[error("钱箱控制失败: {0}")]
     CashDrawer(String),
+    #[error("打印机查询失败: {0}")]
+    Query(String),
     #[error("ESC/POS 驱动错误: {0}")]
     Escpos(String),
     #[error("连接打印机失败: {0}")]

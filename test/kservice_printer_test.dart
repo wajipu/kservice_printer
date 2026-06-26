@@ -566,6 +566,82 @@ void main() {
     expect(_fakeRustApi.maxActiveByKey[connection.queueKey], 1);
   });
 
+  test('printer status query uses queue and parses realtime status', () async {
+    final connection = const PrinterConnection.network(
+      host: '127.0.0.1',
+      port: 9100,
+      timeoutMs: 1000,
+    );
+
+    final status = await queryPrinterStatus(
+      connection,
+      timeout: const Duration(milliseconds: 800),
+    );
+
+    expect(status.supported, isTrue);
+    expect(status.ok, isTrue);
+    expect(status.online, isTrue);
+    expect(status.paperEnd, isFalse);
+    expect(status.raw[1], 0);
+    expect(_fakeRustApi.statusCalls.single, {
+      'key': connection.queueKey,
+      'timeoutMs': 800,
+    });
+    expect(_fakeRustApi.maxActiveByKey[connection.queueKey], 1);
+  });
+
+  test('printer identity exposes serial number', () async {
+    final connection = const PrinterConnection.network(
+      host: '127.0.0.1',
+      port: 9100,
+      timeoutMs: 1000,
+    );
+
+    final identity = await getPrinterIdentity(connection);
+    final serial = await getPrinterSerialNumber(connection);
+
+    expect(identity.supported, isTrue);
+    expect(identity.maker, 'EPSON');
+    expect(identity.model, 'TM-T88VI');
+    expect(identity.serial, 'SN123456');
+    expect(identity.displayName, 'EPSON · TM-T88VI · SN123456');
+    expect(serial, 'SN123456');
+    expect(_fakeRustApi.identityCalls, hasLength(2));
+    expect(_fakeRustApi.maxActiveByKey[connection.queueKey], 1);
+  });
+
+  test(
+    'stress test limits request concurrency and keeps printer queue stable',
+    () async {
+      final connection = const PrinterConnection.network(
+        host: '127.0.0.1',
+        port: 9100,
+        timeoutMs: 1000,
+      );
+      final job = PrintJob(
+        connection: connection,
+        template: const ReceiptTemplate(elements: []),
+        data: {'id': 'stress'},
+      );
+
+      final result = await runPrinterStressTest(
+        job: job,
+        count: 6,
+        concurrency: 3,
+      );
+
+      expect(result.ok, isTrue);
+      expect(result.total, 6);
+      expect(result.success, 6);
+      expect(result.failure, 0);
+      expect(result.concurrency, 3);
+      expect(result.maxInFlight, 3);
+      expect(result.jobs.map((job) => job.index), [0, 1, 2, 3, 4, 5]);
+      expect(_fakeRustApi.startedJobIds, List.filled(6, 'stress'));
+      expect(_fakeRustApi.maxActiveByKey[connection.queueKey], 1);
+    },
+  );
+
   test('print queue allows different printers to run concurrently', () async {
     final template = const ReceiptTemplate(elements: []);
     final firstConnection = const PrinterConnection.network(
@@ -707,6 +783,8 @@ void main() {
 class _FakeRustApi extends RustLibApi {
   final startedJobIds = <String>[];
   final drawerCalls = <Map<String, Object?>>[];
+  final statusCalls = <Map<String, Object?>>[];
+  final identityCalls = <Map<String, Object?>>[];
   final failedQueueKeys = <String>{};
   final maxActiveByKey = <String, int>{};
   final _activeByKey = <String, int>{};
@@ -720,6 +798,8 @@ class _FakeRustApi extends RustLibApi {
   void reset() {
     startedJobIds.clear();
     drawerCalls.clear();
+    statusCalls.clear();
+    identityCalls.clear();
     failedQueueKeys.clear();
     maxActiveByKey.clear();
     _activeByKey.clear();
@@ -764,6 +844,49 @@ class _FakeRustApi extends RustLibApi {
       'ok': true,
       'result': {'printers': usbPrinters},
     });
+  }
+
+  @override
+  Future<String> crateApiPrinterGetPrinterIdentity({
+    required PrinterConnection connection,
+    required int timeoutMs,
+  }) async {
+    final key = connection.queueKey;
+    identityCalls.add({'key': key, 'timeoutMs': timeoutMs});
+    _activeByKey[key] = (_activeByKey[key] ?? 0) + 1;
+    maxActiveByKey[key] = math.max(
+      maxActiveByKey[key] ?? 0,
+      _activeByKey[key] ?? 0,
+    );
+    _activeTotal += 1;
+    maxActiveTotal = math.max(maxActiveTotal, _activeTotal);
+
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      if (failedQueueKeys.contains(key)) {
+        return jsonEncode({'ok': false, 'error': 'offline'});
+      }
+      return jsonEncode({
+        'ok': true,
+        'result': {
+          'supported': true,
+          'maker': 'EPSON',
+          'model': 'TM-T88VI',
+          'serial': 'SN123456',
+          'firmware': '1.00',
+          'raw': {
+            'maker': '4550534f4e',
+            'model': '544d2d5438385649',
+            'serial': '534e313233343536',
+            'firmware': '312e3030',
+          },
+          'timeoutMs': timeoutMs,
+        },
+      });
+    } finally {
+      _activeByKey[key] = (_activeByKey[key] ?? 1) - 1;
+      _activeTotal -= 1;
+    }
   }
 
   @override
@@ -823,6 +946,53 @@ class _FakeRustApi extends RustLibApi {
       return jsonEncode({
         'ok': true,
         'result': {'printed': true, 'bytes': 1},
+      });
+    } finally {
+      _activeByKey[key] = (_activeByKey[key] ?? 1) - 1;
+      _activeTotal -= 1;
+    }
+  }
+
+  @override
+  Future<String> crateApiPrinterQueryPrinterStatus({
+    required PrinterConnection connection,
+    required int timeoutMs,
+  }) async {
+    final key = connection.queueKey;
+    statusCalls.add({'key': key, 'timeoutMs': timeoutMs});
+    _activeByKey[key] = (_activeByKey[key] ?? 0) + 1;
+    maxActiveByKey[key] = math.max(
+      maxActiveByKey[key] ?? 0,
+      _activeByKey[key] ?? 0,
+    );
+    _activeTotal += 1;
+    maxActiveTotal = math.max(maxActiveTotal, _activeTotal);
+
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      if (failedQueueKeys.contains(key)) {
+        return jsonEncode({'ok': false, 'error': 'offline'});
+      }
+      return jsonEncode({
+        'ok': true,
+        'result': {
+          'ok': true,
+          'supported': true,
+          'online': true,
+          'drawerKickOutHigh': false,
+          'coverOpen': false,
+          'paperFeedPressed': false,
+          'paperNearEnd': false,
+          'paperEnd': false,
+          'mechanicalError': false,
+          'cutterError': false,
+          'recoverableError': false,
+          'unrecoverableError': false,
+          'error': false,
+          'raw': {'1': 0, '2': 0, '3': 0, '4': 0},
+          'rawHex': {'1': '00', '2': '00', '3': '00', '4': '00'},
+          'timeoutMs': timeoutMs,
+        },
       });
     } finally {
       _activeByKey[key] = (_activeByKey[key] ?? 1) - 1;

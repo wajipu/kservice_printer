@@ -512,6 +512,212 @@ class PrintResult {
   }
 }
 
+/// ESC/POS 打印机实时状态。
+class PrinterStatus {
+  const PrinterStatus({
+    required this.ok,
+    required this.supported,
+    required this.online,
+    required this.drawerKickOutHigh,
+    required this.coverOpen,
+    required this.paperFeedPressed,
+    required this.paperNearEnd,
+    required this.paperEnd,
+    required this.mechanicalError,
+    required this.cutterError,
+    required this.recoverableError,
+    required this.unrecoverableError,
+    required this.error,
+    required this.raw,
+    required this.rawHex,
+    required this.timeoutMs,
+    this.message,
+  });
+
+  final bool ok;
+  final bool supported;
+  final bool online;
+  final bool drawerKickOutHigh;
+  final bool coverOpen;
+  final bool paperFeedPressed;
+  final bool paperNearEnd;
+  final bool paperEnd;
+  final bool mechanicalError;
+  final bool cutterError;
+  final bool recoverableError;
+  final bool unrecoverableError;
+  final bool error;
+  final Map<int, int> raw;
+  final Map<String, String> rawHex;
+  final int timeoutMs;
+  final String? message;
+
+  bool get ready => ok;
+
+  factory PrinterStatus.fromJson(Map<String, dynamic> json) {
+    if (json['ok'] != true) {
+      return PrinterStatus.unavailable(message: json['error']?.toString());
+    }
+    final result = json['result'];
+    if (result is! Map<String, dynamic>) {
+      return const PrinterStatus.unavailable(message: '打印机状态查询返回格式无效');
+    }
+    return PrinterStatus(
+      ok: result['ok'] == true,
+      supported: result['supported'] == true,
+      online: result['online'] == true,
+      drawerKickOutHigh: result['drawerKickOutHigh'] == true,
+      coverOpen: result['coverOpen'] == true,
+      paperFeedPressed: result['paperFeedPressed'] == true,
+      paperNearEnd: result['paperNearEnd'] == true,
+      paperEnd: result['paperEnd'] == true,
+      mechanicalError: result['mechanicalError'] == true,
+      cutterError: result['cutterError'] == true,
+      recoverableError: result['recoverableError'] == true,
+      unrecoverableError: result['unrecoverableError'] == true,
+      error: result['error'] == true,
+      raw: _intMap(result['raw']),
+      rawHex: _stringMap(result['rawHex']),
+      timeoutMs: result['timeoutMs'] is num
+          ? (result['timeoutMs'] as num).toInt()
+          : 0,
+    );
+  }
+
+  const factory PrinterStatus.unavailable({String? message}) =
+      _UnavailablePrinterStatus;
+}
+
+class _UnavailablePrinterStatus extends PrinterStatus {
+  const _UnavailablePrinterStatus({super.message})
+    : super(
+        ok: false,
+        supported: false,
+        online: false,
+        drawerKickOutHigh: false,
+        coverOpen: false,
+        paperFeedPressed: false,
+        paperNearEnd: false,
+        paperEnd: false,
+        mechanicalError: false,
+        cutterError: false,
+        recoverableError: false,
+        unrecoverableError: false,
+        error: true,
+        raw: const {},
+        rawHex: const {},
+        timeoutMs: 0,
+      );
+}
+
+/// 打印机设备身份信息。
+class PrinterIdentity {
+  const PrinterIdentity({
+    required this.ok,
+    required this.supported,
+    this.maker,
+    this.model,
+    this.serial,
+    this.firmware,
+    this.raw = const {},
+    this.timeoutMs = 0,
+    this.error,
+  });
+
+  final bool ok;
+  final bool supported;
+  final String? maker;
+  final String? model;
+  final String? serial;
+  final String? firmware;
+  final Map<String, String> raw;
+  final int timeoutMs;
+  final String? error;
+
+  String get displayName {
+    final parts = [
+      if (maker != null && maker!.isNotEmpty) maker,
+      if (model != null && model!.isNotEmpty) model,
+      if (serial != null && serial!.isNotEmpty) serial,
+    ];
+    return parts.isEmpty ? 'Unknown printer' : parts.join(' · ');
+  }
+
+  factory PrinterIdentity.fromJson(Map<String, dynamic> json) {
+    if (json['ok'] != true) {
+      return PrinterIdentity(
+        ok: false,
+        supported: false,
+        error: json['error']?.toString(),
+      );
+    }
+    final result = json['result'];
+    if (result is! Map<String, dynamic>) {
+      return const PrinterIdentity(
+        ok: false,
+        supported: false,
+        error: '打印机身份查询返回格式无效',
+      );
+    }
+    return PrinterIdentity(
+      ok: true,
+      supported: result['supported'] == true,
+      maker: _nullableString(result['maker']),
+      model: _nullableString(result['model']),
+      serial: _nullableString(result['serial']),
+      firmware: _nullableString(result['firmware']),
+      raw: _stringMap(result['raw']),
+      timeoutMs: result['timeoutMs'] is num
+          ? (result['timeoutMs'] as num).toInt()
+          : 0,
+    );
+  }
+}
+
+/// 单次压测打印结果。
+class PrinterStressTestJobResult {
+  const PrinterStressTestJobResult({
+    required this.index,
+    required this.ok,
+    required this.bytes,
+    required this.durationMs,
+    this.error,
+  });
+
+  final int index;
+  final bool ok;
+  final int bytes;
+  final int durationMs;
+  final String? error;
+}
+
+/// 并发压测汇总结果。
+class PrinterStressTestResult {
+  const PrinterStressTestResult({
+    required this.total,
+    required this.success,
+    required this.failure,
+    required this.concurrency,
+    required this.queued,
+    required this.durationMs,
+    required this.maxInFlight,
+    required this.totalBytes,
+    required this.jobs,
+  });
+
+  final int total;
+  final int success;
+  final int failure;
+  final int concurrency;
+  final bool queued;
+  final int durationMs;
+  final int maxInFlight;
+  final int totalBytes;
+  final List<PrinterStressTestJobResult> jobs;
+
+  bool get ok => failure == 0;
+}
+
 /// ESC/POS 钱箱脉冲引脚。
 enum CashDrawerPin { pin2, pin5 }
 
@@ -952,6 +1158,25 @@ List<String> _stringList(Object? value) {
   return [for (final item in value) item.toString()];
 }
 
+String? _nullableString(Object? value) {
+  final text = value?.toString();
+  if (text == null || text.isEmpty) {
+    return null;
+  }
+  return text;
+}
+
+Map<int, int> _intMap(Object? value) {
+  if (value is! Map) {
+    return const {};
+  }
+  return {
+    for (final entry in value.entries)
+      if (int.tryParse(entry.key.toString()) != null && entry.value is num)
+        int.parse(entry.key.toString()): (entry.value as num).toInt(),
+  };
+}
+
 Map<String, String> _stringMap(Object? value) {
   if (value is! Map) {
     return const {};
@@ -1044,6 +1269,163 @@ Future<PrintResult> openCashDrawerNow(
 
 int _cashDrawerDurationMs(Duration duration) =>
     duration.inMilliseconds.clamp(0, 510).toInt();
+
+/// 查询 ESC/POS 打印机实时状态。
+///
+/// 默认进入同一台打印机的串行队列，避免状态指令和打印数据交叉。
+Future<PrinterStatus> queryPrinterStatus(
+  PrinterConnection connection, {
+  Duration timeout = const Duration(seconds: 2),
+  bool queued = true,
+}) {
+  if (!queued) {
+    return queryPrinterStatusNow(connection, timeout: timeout);
+  }
+  return _printQueue.enqueue(
+    connection.queueKey,
+    () => queryPrinterStatusNow(connection, timeout: timeout),
+  );
+}
+
+/// 立即查询打印机状态，不经过 Dart 队列。
+Future<PrinterStatus> queryPrinterStatusNow(
+  PrinterConnection connection, {
+  Duration timeout = const Duration(seconds: 2),
+}) async {
+  await initKservicePrinter();
+  final response = await rust_printer.queryPrinterStatus(
+    connection: connection,
+    timeoutMs: _queryTimeoutMs(timeout),
+  );
+  return PrinterStatus.fromJson(jsonDecode(response) as Map<String, dynamic>);
+}
+
+/// 获取打印机身份信息，包含常见 ESC/POS 设备的厂商、型号、序列号和固件版本。
+Future<PrinterIdentity> getPrinterIdentity(
+  PrinterConnection connection, {
+  Duration timeout = const Duration(seconds: 2),
+  bool queued = true,
+}) {
+  if (!queued) {
+    return getPrinterIdentityNow(connection, timeout: timeout);
+  }
+  return _printQueue.enqueue(
+    connection.queueKey,
+    () => getPrinterIdentityNow(connection, timeout: timeout),
+  );
+}
+
+/// 立即获取打印机身份信息，不经过 Dart 队列。
+Future<PrinterIdentity> getPrinterIdentityNow(
+  PrinterConnection connection, {
+  Duration timeout = const Duration(seconds: 2),
+}) async {
+  await initKservicePrinter();
+  final response = await rust_printer.getPrinterIdentity(
+    connection: connection,
+    timeoutMs: _queryTimeoutMs(timeout),
+  );
+  return PrinterIdentity.fromJson(jsonDecode(response) as Map<String, dynamic>);
+}
+
+/// 只取打印机序列号。
+Future<String?> getPrinterSerialNumber(
+  PrinterConnection connection, {
+  Duration timeout = const Duration(seconds: 2),
+  bool queued = true,
+}) async {
+  final identity = await getPrinterIdentity(
+    connection,
+    timeout: timeout,
+    queued: queued,
+  );
+  return identity.serial;
+}
+
+int _queryTimeoutMs(Duration timeout) =>
+    timeout.inMilliseconds.clamp(100, 30000).toInt();
+
+/// 对同一打印任务做并发压测。
+///
+/// [queued] 为 true 时，同一台打印机最终仍会串行写入；压测会模拟多个业务请求
+/// 同时进来，适合验证队列稳定性。设置为 false 会直接并发写设备，通常只用于排查。
+Future<PrinterStressTestResult> runPrinterStressTest({
+  required PrintJob job,
+  int count = 20,
+  int concurrency = 4,
+  bool queued = true,
+  Duration delay = Duration.zero,
+}) async {
+  final total = count.clamp(1, 10000).toInt();
+  final workerCount = concurrency.clamp(1, total).toInt();
+  final stopwatch = Stopwatch()..start();
+  final results = <PrinterStressTestJobResult>[];
+  var nextIndex = 0;
+  var inFlight = 0;
+  var maxInFlight = 0;
+
+  Future<void> worker() async {
+    while (true) {
+      final index = nextIndex;
+      nextIndex += 1;
+      if (index >= total) {
+        return;
+      }
+
+      inFlight += 1;
+      maxInFlight = math.max(maxInFlight, inFlight);
+      final jobStopwatch = Stopwatch()..start();
+      try {
+        final result = await printReceipt(job, queued: queued);
+        jobStopwatch.stop();
+        results.add(
+          PrinterStressTestJobResult(
+            index: index,
+            ok: result.ok,
+            bytes: result.bytes,
+            durationMs: jobStopwatch.elapsedMilliseconds,
+            error: result.error,
+          ),
+        );
+      } catch (error) {
+        jobStopwatch.stop();
+        results.add(
+          PrinterStressTestJobResult(
+            index: index,
+            ok: false,
+            bytes: 0,
+            durationMs: jobStopwatch.elapsedMilliseconds,
+            error: error.toString(),
+          ),
+        );
+      } finally {
+        inFlight -= 1;
+      }
+
+      if (delay.inMicroseconds > 0 && nextIndex < total) {
+        await Future<void>.delayed(delay);
+      }
+    }
+  }
+
+  await Future.wait([for (var i = 0; i < workerCount; i++) worker()]);
+  stopwatch.stop();
+  results.sort((a, b) => a.index.compareTo(b.index));
+
+  final success = results.where((result) => result.ok).length;
+  final totalBytes = results.fold<int>(0, (sum, result) => sum + result.bytes);
+  return PrinterStressTestResult(
+    total: total,
+    success: success,
+    failure: total - success,
+    concurrency: workerCount,
+    queued: queued,
+    durationMs: stopwatch.elapsedMilliseconds,
+    maxInFlight: maxInFlight,
+    totalBytes: totalBytes,
+    jobs: List.unmodifiable(results),
+  );
+}
 
 /// 将“生成打印任务 + 打印”作为一个整体放进队列。
 ///

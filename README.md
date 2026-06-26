@@ -4,14 +4,15 @@ Flutter + Rust 跨平台打印插件，面向 SaaS/POS 订单小票、后厨单�
 
 ## 能力
 
-- Rust `escpos` crate 渲染 ESC/POS 小票指令，内置 TSPL 标签指令渲染
+- Rust `escpos` crate 渲染 ESC/POS 小票指令，内置 TSPL/ZPL 标签指令渲染
 - `flutter_rust_bridge` 直调 Rust（无 C Bridge 中间层）
 - 三种连接方式：**Network**（TCP/IP）、**USB**、**Serial**（串口）
 - WiFi/局域网 mDNS/DNS-SD 自动发现网络打印服务（Android 走原生 NsdManager）
 - JSON 模板 + Handlebars 动态数据（`{{store.name}}` 语法）
-- 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex/二维码/条码/图片；TSPL 标签模式支持文本、分隔线、二维码和条码
+- 支持文本/左右行/列/分隔线/循环明细/走纸/切纸/原始 hex/二维码/条码/图片；TSPL/ZPL 标签模式支持文本、分隔线、二维码和条码
 - 内置打印类型：订单小票、后厨打印、标签打印、预结账单、退款/退菜单、外卖/配送单、自定义打印
-- 内置 58mm/80mm 小票模板和 58mm TSPL 标签模板选择，适合 POS 设置页或打印前选择
+- 内置 58mm/80mm 小票模板和 58mm TSPL/ZPL 标签模板选择，适合 POS 设置页或打印前选择
+- 支持 ESC/POS 状态查询、设备身份/序列号读取和 Dart 侧并发压测
 - `renderReceipt` 调试模式返回十六进制字节，不下发打印机
 
 ## 架构
@@ -37,7 +38,8 @@ rust_printer_core/src/
 ├── api/
 │   └── printer.rs      # PrinterConnection 枚举(FRB 公开类型)
 ├── protocol/
-│   └── tspl.rs         # TSPL 标签指令渲染
+│   ├── tspl.rs         # TSPL 标签指令渲染
+│   └── zpl.rs          # ZPL 标签指令渲染
 └── render/
     ├── mod.rs
     ├── encoding.rs      # 文本编码(GBK/UTF-8 互转)
@@ -232,6 +234,28 @@ await enqueuePrintReceipt(
 ```
 
 可以用 `activePrintQueueCount` 观察当前还有多少个打印机队列未完成。队列只保证单进程内的 Dart 调用串行；如果有多个 App 实例或多个进程同时写同一台打印机，仍需要在业务层做互斥。
+
+### 状态、序列号和压测
+
+状态查询和身份读取默认也进入同一台打印机的队列，避免 ESC/POS 查询指令和正在打印的票据字节交叉：
+
+```dart
+final status = await queryPrinterStatus(
+  job.connection,
+  timeout: const Duration(seconds: 2),
+);
+
+final identity = await getPrinterIdentity(job.connection);
+final serial = await getPrinterSerialNumber(job.connection);
+
+final stress = await runPrinterStressTest(
+  job: job,
+  count: 20,
+  concurrency: 4,
+);
+```
+
+这些查询依赖设备支持双向 ESC/POS raw 读写。常见 9100 网络小票机和部分串口/USB 设备可用；不支持的设备会返回 `supported == false` 或错误信息，不会和普通打印结果混在一起。
 
 ### 模板选择
 

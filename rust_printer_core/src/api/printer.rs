@@ -37,6 +37,14 @@ pub fn open_cash_drawer(connection: PrinterConnection, pin: u8, on_ms: u16, off_
     engine::open_cash_drawer(&connection, pin, on_ms, off_ms)
 }
 
+pub fn query_printer_status(connection: PrinterConnection, timeout_ms: u64) -> String {
+    engine::query_printer_status(&connection, timeout_ms)
+}
+
+pub fn get_printer_identity(connection: PrinterConnection, timeout_ms: u64) -> String {
+    engine::get_printer_identity(&connection, timeout_ms)
+}
+
 pub fn list_usb_printers() -> String {
     engine::list_usb_printers()
 }

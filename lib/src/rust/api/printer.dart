@@ -38,6 +38,22 @@ Future<String> openCashDrawer({
   offMs: offMs,
 );
 
+Future<String> queryPrinterStatus({
+  required PrinterConnection connection,
+  required int timeoutMs,
+}) => RustLib.instance.api.crateApiPrinterQueryPrinterStatus(
+  connection: connection,
+  timeoutMs: timeoutMs,
+);
+
+Future<String> getPrinterIdentity({
+  required PrinterConnection connection,
+  required int timeoutMs,
+}) => RustLib.instance.api.crateApiPrinterGetPrinterIdentity(
+  connection: connection,
+  timeoutMs: timeoutMs,
+);
+
 Future<String> listUsbPrinters() =>
     RustLib.instance.api.crateApiPrinterListUsbPrinters();
 

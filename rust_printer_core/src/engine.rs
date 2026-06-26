@@ -17,6 +17,7 @@ use escpos::printer::Printer;
 use escpos::utils::*;
 use handlebars::{no_escape, Handlebars};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
@@ -185,6 +186,14 @@ pub fn open_cash_drawer(
     into_response(open_cash_drawer_inner(connection, pin, on_ms, off_ms))
 }
 
+pub fn query_printer_status(connection: &PrinterConnection, timeout_ms: u64) -> String {
+    into_response(query_printer_status_inner(connection, timeout_ms))
+}
+
+pub fn get_printer_identity(connection: &PrinterConnection, timeout_ms: u64) -> String {
+    into_response(get_printer_identity_inner(connection, timeout_ms))
+}
+
 pub fn list_usb_printers() -> String {
     into_response(list_usb_printers_inner())
 }
@@ -291,6 +300,71 @@ fn open_cash_drawer_inner(
     Ok(json!({ "printed": true, "bytes": bytes }))
 }
 
+fn query_printer_status_inner(
+    connection: &PrinterConnection,
+    timeout_ms: u64,
+) -> Result<Value, PrinterError> {
+    let timeout_ms = sanitize_query_timeout_ms(timeout_ms);
+    let driver = open_driver_with_timeout(connection, Some(timeout_ms))?;
+    ensure_query_supported(&driver)?;
+
+    let mut raw = BTreeMap::new();
+    for status_type in 1..=4 {
+        let response = read_command_response(&driver, &[0x10, 0x04, status_type], 1)?;
+        if let Some(byte) = response.first() {
+            raw.insert(status_type, *byte);
+        }
+    }
+
+    let mut status = parse_realtime_status(&raw);
+    if let Value::Object(map) = &mut status {
+        map.insert("timeoutMs".to_string(), json!(timeout_ms));
+    }
+    Ok(status)
+}
+
+fn get_printer_identity_inner(
+    connection: &PrinterConnection,
+    timeout_ms: u64,
+) -> Result<Value, PrinterError> {
+    let timeout_ms = sanitize_query_timeout_ms(timeout_ms);
+    let driver = open_driver_with_timeout(connection, Some(timeout_ms))?;
+    ensure_query_supported(&driver)?;
+
+    let mut raw = serde_json::Map::new();
+    let mut values = serde_json::Map::new();
+    for (field, command) in [
+        ("serial", 68_u8),
+        ("model", 67_u8),
+        ("maker", 66_u8),
+        ("firmware", 65_u8),
+    ] {
+        let response = read_command_response(&driver, &[0x1d, b'I', command], 96)?;
+        raw.insert(field.to_string(), json!(hex::encode(&response)));
+
+        let text = clean_identity_text(&response);
+        values.insert(
+            field.to_string(),
+            if text.is_empty() {
+                Value::Null
+            } else {
+                json!(text)
+            },
+        );
+    }
+
+    let supported = values.values().any(|value| !value.is_null());
+    Ok(json!({
+        "supported": supported,
+        "serial": values.remove("serial").unwrap_or(Value::Null),
+        "model": values.remove("model").unwrap_or(Value::Null),
+        "maker": values.remove("maker").unwrap_or(Value::Null),
+        "firmware": values.remove("firmware").unwrap_or(Value::Null),
+        "raw": raw,
+        "timeoutMs": timeout_ms,
+    }))
+}
+
 fn cash_drawer_pulse_command(pin: u8, on_ms: u16, off_ms: u16) -> Result<[u8; 5], PrinterError> {
     if pin > 1 {
         return Err(PrinterError::CashDrawer(format!(
@@ -311,14 +385,21 @@ fn cash_drawer_duration_units(ms: u16) -> u8 {
 }
 
 fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError> {
+    open_driver_with_timeout(connection, None)
+}
+
+fn open_driver_with_timeout(
+    connection: &PrinterConnection,
+    override_timeout_ms: Option<u64>,
+) -> Result<AnyDriver, PrinterError> {
     match connection {
         PrinterConnection::Network {
             host,
             port,
             timeout_ms,
         } => {
-            let driver =
-                TcpDriver::open(host, *port, *timeout_ms).map_err(PrinterError::Connect)?;
+            let timeout_ms = override_timeout_ms.unwrap_or(*timeout_ms).max(1);
+            let driver = TcpDriver::open(host, *port, timeout_ms).map_err(PrinterError::Connect)?;
             Ok(AnyDriver::Tcp(driver))
         }
         PrinterConnection::Usb {
@@ -340,12 +421,139 @@ fn open_driver(connection: &PrinterConnection) -> Result<AnyDriver, PrinterError
             }
         }
         PrinterConnection::Serial { port, baud_rate } => {
-            let timeout = Some(Duration::from_secs(5));
+            let timeout = Some(Duration::from_millis(
+                override_timeout_ms.unwrap_or(5_000).max(1),
+            ));
             let driver = SerialPortDriver::open(port, *baud_rate, timeout)
                 .map_err(|e| PrinterError::Connect(e.to_string()))?;
             Ok(AnyDriver::Serial(driver))
         }
     }
+}
+
+fn sanitize_query_timeout_ms(timeout_ms: u64) -> u64 {
+    timeout_ms.clamp(100, 30_000)
+}
+
+fn ensure_query_supported(driver: &AnyDriver) -> Result<(), PrinterError> {
+    let _ = driver;
+
+    #[cfg(target_os = "windows")]
+    if matches!(driver, AnyDriver::WindowsUsbPrint(_)) {
+        return Err(PrinterError::Query(
+            "Windows USB 打印通道暂不支持双向读取，请使用网络或串口连接查询状态/序列号".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn read_command_response<D: Driver>(
+    driver: &D,
+    command: &[u8],
+    max_len: usize,
+) -> Result<Vec<u8>, PrinterError> {
+    if max_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    driver
+        .write(command)
+        .map_err(|error| PrinterError::Query(error.to_string()))?;
+    driver
+        .flush()
+        .map_err(|error| PrinterError::Query(error.to_string()))?;
+
+    let mut buffer = vec![0; max_len];
+    match driver.read(&mut buffer) {
+        Ok(read) => {
+            buffer.truncate(read.min(max_len));
+            Ok(buffer)
+        }
+        Err(error) if is_read_timeout_error(&error) => Ok(Vec::new()),
+        Err(error) => Err(PrinterError::Query(error.to_string())),
+    }
+}
+
+fn is_read_timeout_error(error: &EscposError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "timed out",
+        "timeout",
+        "would block",
+        "temporarily unavailable",
+        "operation timed out",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn parse_realtime_status(raw: &BTreeMap<u8, u8>) -> Value {
+    let printer = raw.get(&1).copied();
+    let offline = raw.get(&2).copied();
+    let error_status = raw.get(&3).copied();
+    let paper = raw.get(&4).copied();
+
+    let supported = !raw.is_empty();
+    let online = printer
+        .map(|byte| !has_bit(byte, 0x08))
+        .unwrap_or(supported);
+    let cover_open = bit_set(printer, 0x20) || bit_set(offline, 0x04);
+    let paper_feed_pressed = bit_set(printer, 0x40) || bit_set(offline, 0x08);
+    let paper_near_end = bit_set(paper, 0x0c);
+    let paper_end = bit_set(offline, 0x20) || bit_set(paper, 0x60);
+    let mechanical_error = bit_set(error_status, 0x04);
+    let cutter_error = bit_set(error_status, 0x08);
+    let unrecoverable_error = bit_set(error_status, 0x20);
+    let recoverable_error = bit_set(error_status, 0x40);
+    let error = bit_set(offline, 0x40)
+        || mechanical_error
+        || cutter_error
+        || unrecoverable_error
+        || recoverable_error;
+    let ok = supported && online && !cover_open && !paper_end && !error;
+
+    let raw_json: serde_json::Map<String, Value> = raw
+        .iter()
+        .map(|(status_type, byte)| (status_type.to_string(), json!(byte)))
+        .collect();
+    let raw_hex: serde_json::Map<String, Value> = raw
+        .iter()
+        .map(|(status_type, byte)| (status_type.to_string(), json!(format!("{byte:02X}"))))
+        .collect();
+
+    json!({
+        "ok": ok,
+        "supported": supported,
+        "online": online,
+        "drawerKickOutHigh": bit_set(printer, 0x04),
+        "coverOpen": cover_open,
+        "paperFeedPressed": paper_feed_pressed,
+        "paperNearEnd": paper_near_end,
+        "paperEnd": paper_end,
+        "mechanicalError": mechanical_error,
+        "cutterError": cutter_error,
+        "recoverableError": recoverable_error,
+        "unrecoverableError": unrecoverable_error,
+        "error": error,
+        "raw": raw_json,
+        "rawHex": raw_hex,
+    })
+}
+
+fn bit_set(value: Option<u8>, mask: u8) -> bool {
+    value.map(|byte| has_bit(byte, mask)).unwrap_or(false)
+}
+
+fn has_bit(byte: u8, mask: u8) -> bool {
+    byte & mask != 0
+}
+
+fn clean_identity_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .replace(['\0', '\u{1b}'], "")
+        .trim()
+        .to_string()
 }
 
 // ---- TcpDriver ----
@@ -365,6 +573,9 @@ impl TcpDriver {
         let stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
         stream
             .set_write_timeout(Some(timeout))
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_read_timeout(Some(timeout))
             .map_err(|e| e.to_string())?;
         Ok(Self {
             name: format!("tcp://{host}:{port}"),
@@ -876,6 +1087,39 @@ mod tests {
             cash_drawer_pulse_command(2, 200, 200),
             Err(PrinterError::CashDrawer(_))
         ));
+    }
+
+    #[test]
+    fn parses_realtime_status_bytes() {
+        let mut raw = BTreeMap::new();
+        raw.insert(1, 0x00);
+        raw.insert(2, 0x00);
+        raw.insert(3, 0x00);
+        raw.insert(4, 0x00);
+
+        let status = parse_realtime_status(&raw);
+
+        assert_eq!(status["supported"].as_bool(), Some(true));
+        assert_eq!(status["ok"].as_bool(), Some(true));
+        assert_eq!(status["online"].as_bool(), Some(true));
+        assert_eq!(status["paperEnd"].as_bool(), Some(false));
+
+        raw.insert(1, 0x08);
+        raw.insert(4, 0x60);
+        let status = parse_realtime_status(&raw);
+
+        assert_eq!(status["ok"].as_bool(), Some(false));
+        assert_eq!(status["online"].as_bool(), Some(false));
+        assert_eq!(status["paperEnd"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn cleans_identity_text_response() {
+        assert_eq!(clean_identity_text(b"\0TM-T88VI\r\n"), "TM-T88VI");
+        assert_eq!(
+            clean_identity_text(&[0x1b, b'E', b'P', b'S', b'O', b'N']),
+            "EPSON"
+        );
     }
 
     #[test]

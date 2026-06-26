@@ -250,6 +250,96 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
     );
   }
 
+  Future<void> _queryStatus() async {
+    await _runAction(
+      running: '正在查询打印机状态...',
+      action: () async {
+        final status = await queryPrinterStatus(
+          _connection,
+          timeout: _operationTimeout,
+        );
+        if (!status.supported) {
+          return _ActionResult(
+            '状态查询无响应',
+            status.message ?? '设备未返回 ESC/POS 实时状态。',
+          );
+        }
+        return _ActionResult(
+          status.ok ? '打印机状态正常' : '打印机状态异常',
+          [
+            'online: ${status.online}',
+            'coverOpen: ${status.coverOpen}',
+            'paperNearEnd: ${status.paperNearEnd}',
+            'paperEnd: ${status.paperEnd}',
+            'error: ${status.error}',
+            'cutterError: ${status.cutterError}',
+            'raw: ${status.rawHex}',
+            '队列数：$activePrintQueueCount',
+          ].join('\n'),
+        );
+      },
+    );
+  }
+
+  Future<void> _getIdentity() async {
+    await _runAction(
+      running: '正在读取打印机序列号...',
+      action: () async {
+        final identity = await getPrinterIdentity(
+          _connection,
+          timeout: _operationTimeout,
+        );
+        if (!identity.ok) {
+          return _ActionResult('身份读取失败', identity.error ?? '未知错误');
+        }
+        if (!identity.supported) {
+          return const _ActionResult('身份读取无响应', '设备未返回 ESC/POS 身份信息。');
+        }
+        return _ActionResult(
+          '身份读取成功',
+          [
+            'maker: ${identity.maker ?? '-'}',
+            'model: ${identity.model ?? '-'}',
+            'serial: ${identity.serial ?? '-'}',
+            'firmware: ${identity.firmware ?? '-'}',
+            'raw: ${identity.raw}',
+          ].join('\n'),
+        );
+      },
+    );
+  }
+
+  Future<void> _stressTest() async {
+    await _runAction(
+      running: '正在执行并发压测...',
+      action: () async {
+        final result = await runPrinterStressTest(
+          job: _job,
+          count: 10,
+          concurrency: 3,
+          queued: true,
+        );
+        final failed = result.jobs.where((job) => !job.ok).take(5);
+        return _ActionResult(
+          result.ok ? '压测完成' : '压测有失败',
+          [
+            'total: ${result.total}',
+            'success: ${result.success}',
+            'failure: ${result.failure}',
+            'concurrency: ${result.concurrency}',
+            'queued: ${result.queued}',
+            'maxInFlight: ${result.maxInFlight}',
+            'durationMs: ${result.durationMs}',
+            'bytes: ${result.totalBytes}',
+            if (failed.isNotEmpty) '',
+            for (final item in failed)
+              '#${item.index} ${item.durationMs}ms ${item.error ?? 'failed'}',
+          ].join('\n'),
+        );
+      },
+    );
+  }
+
   Future<void> _scanUsbPrinters() async {
     setState(() {
       _scanningUsb = true;
@@ -426,6 +516,10 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
       _networkPortController.text = printer.port.toString();
     }
   }
+
+  Duration get _operationTimeout => Duration(
+    milliseconds: _parseInt(_networkTimeoutController.text, fallback: 2000),
+  );
 
   Future<void> _runAction({
     required String running,
@@ -919,6 +1013,21 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
           onPressed: _busy ? null : _openCashDrawer,
           icon: const Icon(Icons.point_of_sale),
           label: const Text('打开钱箱'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _queryStatus,
+          icon: const Icon(Icons.monitor_heart),
+          label: const Text('查询状态'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _getIdentity,
+          icon: const Icon(Icons.fingerprint),
+          label: const Text('读取序列号'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _stressTest,
+          icon: const Icon(Icons.speed),
+          label: const Text('并发压测'),
         ),
       ],
     );
