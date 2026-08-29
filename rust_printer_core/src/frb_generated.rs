@@ -378,6 +378,17 @@ impl SseDecode for Vec<u8> {
     }
 }
 
+impl SseDecode for Option<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for crate::api::printer::PrinterConnection {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -396,9 +407,11 @@ impl SseDecode for crate::api::printer::PrinterConnection {
             1 => {
                 let mut var_vendorId = <u16>::sse_decode(deserializer);
                 let mut var_productId = <u16>::sse_decode(deserializer);
+                let mut var_deviceName = <Option<String>>::sse_decode(deserializer);
                 return crate::api::printer::PrinterConnection::Usb {
                     vendor_id: var_vendorId,
                     product_id: var_productId,
+                    device_name: var_deviceName,
                 };
             }
             2 => {
@@ -525,10 +538,12 @@ impl flutter_rust_bridge::IntoDart for crate::api::printer::PrinterConnection {
             crate::api::printer::PrinterConnection::Usb {
                 vendor_id,
                 product_id,
+                device_name,
             } => [
                 1.into_dart(),
                 vendor_id.into_into_dart().into_dart(),
                 product_id.into_into_dart().into_dart(),
+                device_name.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::printer::PrinterConnection::Serial { port, baud_rate } => [
@@ -582,6 +597,16 @@ impl SseEncode for Vec<u8> {
     }
 }
 
+impl SseEncode for Option<String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::api::printer::PrinterConnection {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -599,10 +624,12 @@ impl SseEncode for crate::api::printer::PrinterConnection {
             crate::api::printer::PrinterConnection::Usb {
                 vendor_id,
                 product_id,
+                device_name,
             } => {
                 <i32>::sse_encode(1, serializer);
                 <u16>::sse_encode(vendor_id, serializer);
                 <u16>::sse_encode(product_id, serializer);
+                <Option<String>>::sse_encode(device_name, serializer);
             }
             crate::api::printer::PrinterConnection::Serial { port, baud_rate } => {
                 <i32>::sse_encode(2, serializer);

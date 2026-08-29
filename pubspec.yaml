@@ -1,7 +1,15 @@
 name: kservice_printer
 description: "Flutter + Rust ESC/POS printer plugin for POS receipts, kitchen tickets, and labels."
-version: 0.0.6
-homepage:
+version: 0.0.7
+homepage: https://github.com/wajipu/kservice_printer
+repository: https://github.com/wajipu/kservice_printer
+issue_tracker: https://github.com/wajipu/kservice_printer/issues
+topics:
+  - printer
+  - escpos
+  - zpl
+  - tspl
+  - pos
 
 environment:
   sdk: ^3.12.0

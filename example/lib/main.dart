@@ -194,15 +194,24 @@ class _PrinterDebugPageState extends State<PrinterDebugPage> {
         port: _parseInt(_networkPortController.text, fallback: 9100),
         timeoutMs: _parseInt(_networkTimeoutController.text, fallback: 3000),
       ),
-      _ConnectionMode.usb => PrinterConnection.usb(
-        vendorId: _parseInt(_usbVendorController.text, fallback: 0x0483),
-        productId: _parseInt(_usbProductController.text, fallback: 0x070B),
-      ),
+      _ConnectionMode.usb => _usbConnection,
       _ConnectionMode.serial => PrinterConnection.serial(
         port: _serialPortController.text.trim(),
         baudRate: _parseInt(_serialBaudController.text, fallback: 115200),
       ),
     };
+  }
+
+  PrinterConnection get _usbConnection {
+    final vendorId = _parseInt(_usbVendorController.text, fallback: 0x0483);
+    final productId = _parseInt(_usbProductController.text, fallback: 0x070B);
+    final selected = _selectedUsbPrinter;
+    if (selected != null &&
+        selected.vendorId == vendorId &&
+        selected.productId == productId) {
+      return selected.connection;
+    }
+    return PrinterConnection.usb(vendorId: vendorId, productId: productId);
   }
 
   Future<void> _render() async {

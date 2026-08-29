@@ -37,6 +37,26 @@ pub enum PrinterError {
     Connect(String),
 }
 
+impl PrinterError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidTemplate(_) => "invalid_template",
+            Self::InvalidData(_) => "invalid_data",
+            Self::Render(_) => "render_failed",
+            Self::Encode(_) => "encode_failed",
+            Self::ImageRender(_) => "image_render_failed",
+            Self::InvalidImageData(_) => "invalid_image_data",
+            Self::LabelRender(_) => "label_render_failed",
+            Self::InvalidRawHex(_) => "invalid_raw_hex",
+            Self::Discovery(_) => "discovery_failed",
+            Self::CashDrawer(_) => "cash_drawer_failed",
+            Self::Query(_) => "query_failed",
+            Self::Escpos(_) => "driver_failed",
+            Self::Connect(_) => "connect_failed",
+        }
+    }
+}
+
 impl From<EscposError> for PrinterError {
     fn from(e: EscposError) -> Self {
         PrinterError::Escpos(e.to_string())

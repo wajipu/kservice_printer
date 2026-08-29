@@ -9,6 +9,8 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 import android.net.nsd.NsdManager;
@@ -34,6 +36,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -46,6 +50,7 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
     private Context applicationContext;
     private Handler mainHandler;
     private MethodChannel channel;
+    private ExecutorService usbExecutor;
     private NetworkDiscoveryRequest activeDiscoveryRequest;
     private UsbPermissionRequest activeUsbPermissionRequest;
 
@@ -53,6 +58,7 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
     public void onAttachedToEngine(FlutterPluginBinding binding) {
         applicationContext = binding.getApplicationContext();
         mainHandler = new Handler(Looper.getMainLooper());
+        usbExecutor = Executors.newFixedThreadPool(4);
         channel = new MethodChannel(binding.getBinaryMessenger(), CHANNEL_NAME);
         channel.setMethodCallHandler(this);
     }
@@ -70,15 +76,19 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
         if (channel != null) {
             channel.setMethodCallHandler(null);
         }
+        if (usbExecutor != null) {
+            usbExecutor.shutdownNow();
+        }
         channel = null;
+        usbExecutor = null;
         mainHandler = null;
         applicationContext = null;
     }
 
     @Override
     public void onMethodCall(MethodCall call, Result result) {
-        if (applicationContext == null || mainHandler == null) {
-            result.success(errorResponse("Android 插件尚未完成初始化"));
+        if (applicationContext == null || mainHandler == null || usbExecutor == null) {
+            result.success(errorResponse("plugin_not_ready", "Android 插件尚未完成初始化"));
             return;
         }
 
@@ -89,6 +99,13 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
 
         if ("requestUsbPrinterPermission".equals(call.method)) {
             handleUsbPermissionRequest(call, result);
+            return;
+        }
+
+        if ("writeUsbPrinter".equals(call.method)
+                || "queryUsbPrinterStatus".equals(call.method)
+                || "getUsbPrinterIdentity".equals(call.method)) {
+            handleUsbOperation(call, result);
             return;
         }
 
@@ -176,14 +193,165 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
         requestHolder[0].start();
     }
 
+    private void handleUsbOperation(MethodCall call, Result result) {
+        final Context context = applicationContext;
+        final Handler handler = mainHandler;
+        final ExecutorService executor = usbExecutor;
+        if (context == null || handler == null || executor == null) {
+            result.success(errorResponse("plugin_not_ready", "Android 插件尚未完成初始化"));
+            return;
+        }
+
+        final Number vendorId = numberArgument(call, "vendorId");
+        final Number productId = numberArgument(call, "productId");
+        final String deviceName = call.argument("deviceName");
+        final int timeoutMs = normalizeUsbTimeout(numberArgument(call, "timeoutMs"));
+        final byte[] data = call.argument("data");
+        if (vendorId == null || productId == null) {
+            result.success(errorResponse("invalid_argument", "USB vendorId 和 productId 不能为空"));
+            return;
+        }
+        if ("writeUsbPrinter".equals(call.method) && (data == null || data.length == 0)) {
+            result.success(errorResponse("invalid_argument", "USB 打印数据不能为空"));
+            return;
+        }
+
+        executor.execute(
+                () -> {
+                    String response;
+                    try {
+                        UsbManager usbManager =
+                                (UsbManager) context.getSystemService(Context.USB_SERVICE);
+                        if (usbManager == null) {
+                            throw new UsbIoException(
+                                    "usb_unavailable", "Android 系统未提供 UsbManager");
+                        }
+                        UsbDevice device =
+                                resolveUsbDevice(
+                                        usbManager,
+                                        deviceName,
+                                        vendorId.intValue(),
+                                        productId.intValue());
+                        if ("writeUsbPrinter".equals(call.method)) {
+                            response = writeUsbPrinterResponse(usbManager, device, data, timeoutMs);
+                        } else if ("queryUsbPrinterStatus".equals(call.method)) {
+                            response = queryUsbPrinterStatusResponse(usbManager, device, timeoutMs);
+                        } else {
+                            response = getUsbPrinterIdentityResponse(usbManager, device, timeoutMs);
+                        }
+                    } catch (UsbIoException e) {
+                        response = errorResponse(e.code, e.getMessage());
+                    } catch (JSONException e) {
+                        response = errorResponse("response_encode_failed", "USB 响应编码失败: " + messageFor(e));
+                    } catch (RuntimeException e) {
+                        response = errorResponse("usb_io_failed", "USB 操作失败: " + messageFor(e));
+                    }
+                    final String completedResponse = response;
+                    handler.post(() -> result.success(completedResponse));
+                });
+    }
+
+    private static String writeUsbPrinterResponse(
+            UsbManager usbManager, UsbDevice device, byte[] data, int timeoutMs)
+            throws UsbIoException, JSONException {
+        try (UsbSession session = UsbSession.open(usbManager, device, false)) {
+            int written = session.write(data, timeoutMs);
+            JSONObject payload = new JSONObject();
+            payload.put("printed", true);
+            payload.put("bytes", written);
+            return successResponse(payload);
+        }
+    }
+
+    private static String queryUsbPrinterStatusResponse(
+            UsbManager usbManager, UsbDevice device, int timeoutMs)
+            throws UsbIoException, JSONException {
+        try (UsbSession session = UsbSession.open(usbManager, device, true)) {
+            long deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs;
+            Map<Integer, Integer> raw = new HashMap<>();
+            for (int statusType = 1; statusType <= 4; statusType += 1) {
+                byte[] response =
+                        session.exchange(
+                                new byte[] {0x10, 0x04, (byte) statusType},
+                                1,
+                                remainingTimeout(deadline));
+                if (response.length > 0) {
+                    raw.put(statusType, response[0] & 0xff);
+                }
+            }
+            return successResponse(usbStatusJson(raw, timeoutMs));
+        }
+    }
+
+    private static String getUsbPrinterIdentityResponse(
+            UsbManager usbManager, UsbDevice device, int timeoutMs)
+            throws UsbIoException, JSONException {
+        try (UsbSession session = UsbSession.open(usbManager, device, false)) {
+            long deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs;
+            JSONObject raw = new JSONObject();
+            JSONObject payload = new JSONObject();
+            boolean supported = false;
+            String[] fields = {"serial", "model", "maker", "firmware"};
+            int[] commands = {68, 67, 66, 65};
+            for (int index = 0; index < fields.length; index += 1) {
+                byte[] response = session.canRead()
+                        ? session.exchange(
+                                new byte[] {0x1d, 0x49, (byte) commands[index]},
+                                96,
+                                remainingTimeout(deadline))
+                        : new byte[0];
+                String value = cleanUsbText(response);
+                raw.put(fields[index], bytesToHex(response));
+                if (value.isEmpty()) {
+                    payload.put(fields[index], JSONObject.NULL);
+                } else {
+                    payload.put(fields[index], value);
+                    supported = true;
+                }
+            }
+
+            supported |= putUsbDescriptorFallback(
+                    payload, "serial", safeUsbString(() -> device.getSerialNumber()));
+            supported |= putUsbDescriptorFallback(
+                    payload, "model", safeUsbString(() -> device.getProductName()));
+            supported |= putUsbDescriptorFallback(
+                    payload, "maker", safeUsbString(() -> device.getManufacturerName()));
+            payload.put("supported", supported);
+            payload.put("raw", raw);
+            payload.put("timeoutMs", timeoutMs);
+            return successResponse(payload);
+        }
+    }
+
+    private static boolean putUsbDescriptorFallback(
+            JSONObject payload, String field, String value) throws JSONException {
+        if (!payload.isNull(field) || value == null || value.isEmpty()) {
+            return false;
+        }
+        payload.put(field, value);
+        return true;
+    }
+
+    private static String successResponse(JSONObject payload) throws JSONException {
+        JSONObject root = new JSONObject();
+        root.put("ok", true);
+        root.put("result", payload);
+        return root.toString();
+    }
+
     private static String errorResponse(String message) {
+        return errorResponse("platform_error", message);
+    }
+
+    private static String errorResponse(String code, String message) {
         try {
             JSONObject root = new JSONObject();
             root.put("ok", false);
+            root.put("errorCode", code);
             root.put("error", message);
             return root.toString();
         } catch (JSONException e) {
-            return "{\"ok\":false,\"error\":\"网络打印机扫描失败\"}";
+            return "{\"ok\":false,\"errorCode\":\"response_encode_failed\",\"error\":\"响应编码失败\"}";
         }
     }
 
@@ -228,6 +396,281 @@ public class KservicePrinterPlugin implements FlutterPlugin, MethodCallHandler {
             }
         }
         return null;
+    }
+
+    private static UsbDevice resolveUsbDevice(
+            UsbManager usbManager, String deviceName, int vendorId, int productId)
+            throws UsbIoException {
+        Map<String, UsbDevice> devices = usbManager.getDeviceList();
+        if (deviceName != null && !deviceName.isEmpty()) {
+            UsbDevice device = devices.get(deviceName);
+            if (device == null) {
+                throw new UsbIoException(
+                        "usb_device_not_found", "指定 USB 设备已断开，请重新扫描设备");
+            }
+            if (device.getVendorId() != vendorId || device.getProductId() != productId) {
+                throw new UsbIoException(
+                        "usb_device_changed", "USB 设备路径对应的硬件已变化，请重新扫描设备");
+            }
+            return device;
+        }
+
+        UsbDevice matched = null;
+        for (UsbDevice device : devices.values()) {
+            if (device.getVendorId() == vendorId && device.getProductId() == productId) {
+                if (matched != null) {
+                    throw new UsbIoException(
+                            "usb_device_ambiguous",
+                            "发现多台相同 VID/PID 的 USB 设备，请使用扫描结果中的 connection");
+                }
+                matched = device;
+            }
+        }
+        if (matched == null) {
+            throw new UsbIoException("usb_device_not_found", "没有找到匹配的 USB 打印机");
+        }
+        return matched;
+    }
+
+    private static int normalizeUsbTimeout(Number timeoutMs) {
+        int value = timeoutMs == null ? 5000 : timeoutMs.intValue();
+        return Math.max(100, Math.min(30000, value));
+    }
+
+    private static int remainingTimeout(long deadline) {
+        long remaining = deadline - android.os.SystemClock.elapsedRealtime();
+        return (int) Math.max(1L, Math.min(30000L, remaining));
+    }
+
+    private static JSONObject usbStatusJson(Map<Integer, Integer> raw, int timeoutMs)
+            throws JSONException {
+        Integer printer = raw.get(1);
+        Integer offline = raw.get(2);
+        Integer errorStatus = raw.get(3);
+        Integer paper = raw.get(4);
+        boolean supported = !raw.isEmpty();
+        boolean online = printer == null ? supported : !bitSet(printer, 0x08);
+        boolean coverOpen = bitSet(printer, 0x20) || bitSet(offline, 0x04);
+        boolean paperFeedPressed = bitSet(printer, 0x40) || bitSet(offline, 0x08);
+        boolean paperNearEnd = bitSet(paper, 0x0c);
+        boolean paperEnd = bitSet(offline, 0x20) || bitSet(paper, 0x60);
+        boolean mechanicalError = bitSet(errorStatus, 0x04);
+        boolean cutterError = bitSet(errorStatus, 0x08);
+        boolean unrecoverableError = bitSet(errorStatus, 0x20);
+        boolean recoverableError = bitSet(errorStatus, 0x40);
+        boolean error =
+                bitSet(offline, 0x40)
+                        || mechanicalError
+                        || cutterError
+                        || unrecoverableError
+                        || recoverableError;
+
+        JSONObject rawJson = new JSONObject();
+        JSONObject rawHex = new JSONObject();
+        for (Map.Entry<Integer, Integer> entry : raw.entrySet()) {
+            rawJson.put(entry.getKey().toString(), entry.getValue());
+            rawHex.put(entry.getKey().toString(), String.format(Locale.US, "%02X", entry.getValue()));
+        }
+
+        JSONObject payload = new JSONObject();
+        payload.put("ok", supported && online && !coverOpen && !paperEnd && !error);
+        payload.put("supported", supported);
+        payload.put("online", online);
+        payload.put("drawerKickOutHigh", bitSet(printer, 0x04));
+        payload.put("coverOpen", coverOpen);
+        payload.put("paperFeedPressed", paperFeedPressed);
+        payload.put("paperNearEnd", paperNearEnd);
+        payload.put("paperEnd", paperEnd);
+        payload.put("mechanicalError", mechanicalError);
+        payload.put("cutterError", cutterError);
+        payload.put("recoverableError", recoverableError);
+        payload.put("unrecoverableError", unrecoverableError);
+        payload.put("error", error);
+        payload.put("raw", rawJson);
+        payload.put("rawHex", rawHex);
+        payload.put("timeoutMs", timeoutMs);
+        return payload;
+    }
+
+    private static boolean bitSet(Integer value, int mask) {
+        return value != null && (value & mask) != 0;
+    }
+
+    private static String cleanUsbText(byte[] data) {
+        return new String(data, StandardCharsets.UTF_8)
+                .replace("\0", "")
+                .replace("\u001b", "")
+                .trim();
+    }
+
+    private static String bytesToHex(byte[] data) {
+        char[] digits = "0123456789abcdef".toCharArray();
+        char[] output = new char[data.length * 2];
+        for (int index = 0; index < data.length; index += 1) {
+            int value = data[index] & 0xff;
+            output[index * 2] = digits[value >>> 4];
+            output[index * 2 + 1] = digits[value & 0x0f];
+        }
+        return new String(output);
+    }
+
+    private static final class UsbIoException extends Exception {
+        final String code;
+
+        UsbIoException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
+    private static final class UsbInterfaceSelection {
+        final UsbInterface usbInterface;
+        final UsbEndpoint outputEndpoint;
+        final UsbEndpoint inputEndpoint;
+
+        UsbInterfaceSelection(
+                UsbInterface usbInterface,
+                UsbEndpoint outputEndpoint,
+                UsbEndpoint inputEndpoint) {
+            this.usbInterface = usbInterface;
+            this.outputEndpoint = outputEndpoint;
+            this.inputEndpoint = inputEndpoint;
+        }
+    }
+
+    private static final class UsbSession implements AutoCloseable {
+        private static final int WRITE_CHUNK_BYTES = 16 * 1024;
+
+        private final UsbDeviceConnection connection;
+        private final UsbInterface usbInterface;
+        private final UsbEndpoint outputEndpoint;
+        private final UsbEndpoint inputEndpoint;
+
+        private UsbSession(
+                UsbDeviceConnection connection,
+                UsbInterface usbInterface,
+                UsbEndpoint outputEndpoint,
+                UsbEndpoint inputEndpoint) {
+            this.connection = connection;
+            this.usbInterface = usbInterface;
+            this.outputEndpoint = outputEndpoint;
+            this.inputEndpoint = inputEndpoint;
+        }
+
+        static UsbSession open(UsbManager usbManager, UsbDevice device, boolean requireInput)
+                throws UsbIoException {
+            if (!usbManager.hasPermission(device)) {
+                throw new UsbIoException(
+                        "usb_permission_required", "USB 打印机尚未授权，请先请求设备权限");
+            }
+            UsbInterfaceSelection selection = selectInterface(device, requireInput);
+            if (selection == null) {
+                String code = requireInput ? "usb_read_unsupported" : "usb_interface_not_found";
+                String message = requireInput
+                        ? "USB 打印机没有可读取的 bulk IN 端点，无法查询状态"
+                        : "USB 设备没有可写入的 bulk OUT 端点";
+                throw new UsbIoException(code, message);
+            }
+
+            UsbDeviceConnection connection = usbManager.openDevice(device);
+            if (connection == null) {
+                throw new UsbIoException("usb_open_failed", "无法打开 USB 打印机连接");
+            }
+            if (!connection.claimInterface(selection.usbInterface, true)) {
+                connection.close();
+                throw new UsbIoException("usb_claim_failed", "无法占用 USB 打印机接口");
+            }
+            return new UsbSession(
+                    connection,
+                    selection.usbInterface,
+                    selection.outputEndpoint,
+                    selection.inputEndpoint);
+        }
+
+        int write(byte[] data, int timeoutMs) throws UsbIoException {
+            int offset = 0;
+            while (offset < data.length) {
+                int length = Math.min(WRITE_CHUNK_BYTES, data.length - offset);
+                int written =
+                        connection.bulkTransfer(
+                                outputEndpoint, data, offset, length, timeoutMs);
+                if (written <= 0) {
+                    throw new UsbIoException(
+                            "usb_write_failed", "USB 写入失败，已写入 " + offset + " 字节");
+                }
+                offset += written;
+            }
+            return offset;
+        }
+
+        byte[] exchange(byte[] command, int maxReadLength, int timeoutMs)
+                throws UsbIoException {
+            write(command, timeoutMs);
+            if (inputEndpoint == null || maxReadLength <= 0) {
+                return new byte[0];
+            }
+            byte[] buffer = new byte[maxReadLength];
+            int read = connection.bulkTransfer(inputEndpoint, buffer, buffer.length, timeoutMs);
+            if (read <= 0) {
+                return new byte[0];
+            }
+            byte[] response = new byte[read];
+            System.arraycopy(buffer, 0, response, 0, read);
+            return response;
+        }
+
+        boolean canRead() {
+            return inputEndpoint != null;
+        }
+
+        @Override
+        public void close() {
+            try {
+                connection.releaseInterface(usbInterface);
+            } catch (RuntimeException ignored) {
+            }
+            connection.close();
+        }
+
+        private static UsbInterfaceSelection selectInterface(
+                UsbDevice device, boolean requireInput) {
+            UsbInterfaceSelection best = null;
+            int bestScore = Integer.MIN_VALUE;
+            for (int interfaceIndex = 0;
+                    interfaceIndex < device.getInterfaceCount();
+                    interfaceIndex += 1) {
+                UsbInterface usbInterface = device.getInterface(interfaceIndex);
+                UsbEndpoint output = null;
+                UsbEndpoint input = null;
+                for (int endpointIndex = 0;
+                        endpointIndex < usbInterface.getEndpointCount();
+                        endpointIndex += 1) {
+                    UsbEndpoint endpoint = usbInterface.getEndpoint(endpointIndex);
+                    if (endpoint.getType() != UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                        continue;
+                    }
+                    if (endpoint.getDirection() == UsbConstants.USB_DIR_OUT && output == null) {
+                        output = endpoint;
+                    } else if (endpoint.getDirection() == UsbConstants.USB_DIR_IN && input == null) {
+                        input = endpoint;
+                    }
+                }
+                if (output == null || (requireInput && input == null)) {
+                    continue;
+                }
+                int score = usbInterface.getInterfaceClass() == UsbConstants.USB_CLASS_PRINTER
+                        ? 100
+                        : 0;
+                if (input != null) {
+                    score += 10;
+                }
+                if (score > bestScore) {
+                    best = new UsbInterfaceSelection(usbInterface, output, input);
+                    bestScore = score;
+                }
+            }
+            return best;
+        }
     }
 
     private static String messageFor(Exception e) {

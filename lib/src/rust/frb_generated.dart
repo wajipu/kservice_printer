@@ -427,6 +427,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
   PrinterConnection dco_decode_printer_connection(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     switch (raw[0]) {
@@ -440,6 +446,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return PrinterConnection_Usb(
           vendorId: dco_decode_u_16(raw[1]),
           productId: dco_decode_u_16(raw[2]),
+          deviceName: dco_decode_opt_String(raw[3]),
         );
       case 2:
         return PrinterConnection_Serial(
@@ -523,6 +530,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   PrinterConnection sse_decode_printer_connection(
     SseDeserializer deserializer,
   ) {
@@ -542,9 +560,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 1:
         var var_vendorId = sse_decode_u_16(deserializer);
         var var_productId = sse_decode_u_16(deserializer);
+        var var_deviceName = sse_decode_opt_String(deserializer);
         return PrinterConnection_Usb(
           vendorId: var_vendorId,
           productId: var_productId,
+          deviceName: var_deviceName,
         );
       case 2:
         var var_port = sse_decode_String(deserializer);
@@ -637,6 +657,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_printer_connection(
     PrinterConnection self,
     SseSerializer serializer,
@@ -655,10 +685,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case PrinterConnection_Usb(
         vendorId: final vendorId,
         productId: final productId,
+        deviceName: final deviceName,
       ):
         sse_encode_i_32(1, serializer);
         sse_encode_u_16(vendorId, serializer);
         sse_encode_u_16(productId, serializer);
+        sse_encode_opt_String(deviceName, serializer);
       case PrinterConnection_Serial(port: final port, baudRate: final baudRate):
         sse_encode_i_32(2, serializer);
         sse_encode_String(port, serializer);

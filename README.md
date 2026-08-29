@@ -49,7 +49,7 @@ rust_printer_core/src/
 ```
 
 - Rust 层：模板解析、Handlebars 渲染，按模板编码生成 ESC/POS 或 TSPL 指令
-- Dart 层：`PrinterConnection` 枚举选择连接方式，FRB 自动序列化；Android 网络发现额外走 MethodChannel 调原生 NSD
+- Dart 层：`PrinterConnection` 枚举选择连接方式，FRB 自动序列化；Android 网络发现和授权 USB I/O 走 MethodChannel 调原生 API
 - 不依赖 C Bridge 或 dart:ffi 手写绑定
 - macOS 走 CocoaPods script phase + cargokit，Android/Linux/Windows 走 cargokit
 
@@ -57,12 +57,14 @@ rust_printer_core/src/
 
 | 平台 | Network | USB | Serial | 构建方式 |
 |------|---------|-----|--------|---------|
-| **Android** | ✅ (含原生 mDNS) | ⚠️ (原生扫描；打印需 USB 授权适配) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
+| **Android** | ✅ (含原生 mDNS) | ✅* (`UsbManager` bulk I/O) | ⚠️ (需 OTG 转串口) | Gradle + cargokit |
 | **macOS** | ✅ | ✅ (IOKit) | ✅ | CocoaPods + cargokit |
 | **Linux** | ✅ | ✅ (libusb) | ✅ | CMake + cargokit |
 | **Windows** | ✅ | ✅ (`usbprint.sys`) | ✅ | CMake + cargokit |
 
-Android USB 扫描通过原生 `UsbManager` 执行，默认只返回系统识别为 USB printer class 的设备，并会返回设备的 `hasPermission` 状态；插件 Manifest 会合并 `android.hardware.usb.host`。可以调用 `requestUsbPrinterPermission(printer)` 触发 Android 系统 USB 设备授权弹窗。Android USB 打印仍需要单独适配 `UsbManager.openDevice()` 授权后的 file descriptor 写入通道，因为当前 Rust `UsbDriver` 不能直接消费 Android 授权后返回的 file descriptor。生产环境建议优先使用网络打印，或在业务 App 中补齐 Android USB 打印通道后再启用 USB 打印。
+Android USB 扫描、授权和数据传输均通过原生 `UsbManager` 执行。授权后插件会选择带 bulk OUT 的打印接口，分块写入 Rust 渲染出的 ESC/POS、TSPL 或 ZPL 指令；带 bulk IN 的双向设备还可以查询状态和序列号。插件 Manifest 会自动合并 `android.hardware.usb.host`。
+
+`*` Android USB 原生通道和四 ABI APK 构建已通过自动化验证；当前仓库尚未建立真实打印机型号矩阵，正式接入前仍需对目标机型验证出纸、切刀、钱箱、状态回读和序列号。只有 bulk OUT 的设备可以打印，身份信息会回退到 Android USB 描述符，但实时状态查询需要 bulk IN。
 
 ## 使用
 
@@ -126,10 +128,27 @@ final allUsbDevices = await listUsbPrinters(includeNonPrinters: true);
 
 `listUsbPrinters()` 默认只返回 `isPrinter == true` 的设备，避免把 Hub、手机、声卡、鼠标键盘接收器等普通 USB 设备展示成打印机。现场排查某些厂商私有 USB class 打印机时，可以临时使用 `includeNonPrinters: true` 查看完整 USB 设备清单。
 
+Android 打印前需要系统授权，并应使用扫描结果生成连接；这样会保留 `deviceName`，两台相同 VID/PID 的设备也不会被误选：
+
+```dart
+final printer = (await listUsbPrinters()).first;
+if (printer.hasPermission != true) {
+  final granted = await requestUsbPrinterPermission(printer);
+  if (!granted) throw StateError('用户未授权 USB 打印机');
+}
+
+final job = PrintJob(
+  connection: printer.connection,
+  template: defaultOrderReceiptTemplate(),
+  data: orderData,
+);
+await printReceipt(job);
+```
+
 ### 平台权限说明
 
 - macOS：如果宿主 App 开启 App Sandbox，USB 扫描/打印需要 `com.apple.security.device.usb`，网络打印和 mDNS 发现需要 `com.apple.security.network.client`；mDNS 接收响应时建议同时保留 `com.apple.security.network.server`。示例 App 已配置。
-- Android：网络发现的 manifest 权限已由插件合并；Android 13+ 的 `NEARBY_WIFI_DEVICES` 是运行时权限，需要业务 App 在扫描前请求。`listUsbPrinters()` 走原生 `UsbManager` 扫描，默认过滤非打印机设备；返回的 `UsbPrinterInfo.hasPermission` 表示系统是否已授权该 USB 设备；`requestUsbPrinterPermission(printer)` 可请求该设备授权。USB 打印仍需要业务侧或后续插件版本实现 Android file descriptor 打印通道。
+- Android：网络发现的 manifest 权限已由插件合并；Android 13+ 的 `NEARBY_WIFI_DEVICES` 是运行时权限，需要业务 App 在扫描前请求。`listUsbPrinters()` 走原生 `UsbManager` 扫描，默认过滤非打印机设备；返回的 `UsbPrinterInfo.hasPermission` 表示系统是否已授权该 USB 设备；`requestUsbPrinterPermission(printer)` 可请求授权。打印、钱箱和双向查询均复用授权后的原生 USB bulk 通道。
 - Linux：没有 App manifest 权限；网络发现/网络打印通常不需要应用级权限，但防火墙可能影响 mDNS UDP 5353。普通用户访问 USB 设备通常需要 udev 规则或加入对应设备组，否则 libusb 可能只能用 `sudo` 访问。
 - Windows：普通 Flutter Win32 App 没有类似 macOS 的网络 entitlement；网络发现/网络打印通常不需要 manifest 能力，但防火墙可能影响 mDNS UDP 5353。USB 打印通过 Windows 标准 `usbprint.sys` 设备接口写入原始 ESC/POS/TSPL 字节，适合系统识别为 USB printer class 的小票机/标签机。
 
@@ -256,6 +275,10 @@ final stress = await runPrinterStressTest(
 ```
 
 这些查询依赖设备支持双向 ESC/POS raw 读写。常见 9100 网络小票机和部分串口/USB 设备可用；不支持的设备会返回 `supported == false` 或错误信息，不会和普通打印结果混在一起。
+
+### 稳定错误码
+
+失败结果保留原有中文 `error`，并新增固定的 `errorCode`，便于业务层做重试、提示或告警。`PrintResult`、`RenderResult`、`PrinterStatus` 和 `PrinterIdentity` 都会解析该字段。常见值包括 `usb_permission_required`、`usb_device_not_found`、`usb_device_ambiguous`、`usb_write_failed`、`usb_read_unsupported`、`connect_failed`、`query_failed` 和 `invalid_template`。
 
 ### 模板选择
 

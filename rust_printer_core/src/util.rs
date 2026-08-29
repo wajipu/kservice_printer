@@ -14,7 +14,12 @@ use crate::template::{Align, Element};
 pub(crate) fn into_response(result: Result<Value, PrinterError>) -> String {
     match result {
         Ok(value) => json!({ "ok": true, "result": value }).to_string(),
-        Err(err) => json!({ "ok": false, "error": err.to_string() }).to_string(),
+        Err(err) => json!({
+            "ok": false,
+            "errorCode": err.code(),
+            "error": err.to_string(),
+        })
+        .to_string(),
     }
 }
 

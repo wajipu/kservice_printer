@@ -82,9 +82,11 @@ sealed class PrinterConnection with _$PrinterConnection {
   /// USB 打印机。
   /// vendor_id: USB 厂商 ID（十六进制，如 0x0525）
   /// product_id: USB 产品 ID（十六进制，如 0xa700）
+  /// device_name: Android UsbManager 返回的设备路径，用于区分相同 VID/PID 的设备
   const factory PrinterConnection.usb({
     required int vendorId,
     required int productId,
+    String? deviceName,
   }) = PrinterConnection_Usb;
 
   /// 串口打印机。

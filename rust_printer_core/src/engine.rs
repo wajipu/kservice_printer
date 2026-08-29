@@ -405,6 +405,7 @@ fn open_driver_with_timeout(
         PrinterConnection::Usb {
             vendor_id,
             product_id,
+            device_name: _,
         } => {
             #[cfg(target_os = "windows")]
             {
@@ -1309,6 +1310,7 @@ mod tests {
         let connection = PrinterConnection::Usb {
             vendor_id,
             product_id,
+            device_name: None,
         };
         let template = json!({
             "width": 32,
@@ -1348,6 +1350,7 @@ mod tests {
         let connection = PrinterConnection::Usb {
             vendor_id,
             product_id,
+            device_name: None,
         };
         let image_path = create_test_logo();
         let template = advanced_template(&image_path);
@@ -1373,6 +1376,7 @@ mod tests {
         let connection = PrinterConnection::Usb {
             vendor_id,
             product_id,
+            device_name: None,
         };
         let template = json!({
             "width": 32,

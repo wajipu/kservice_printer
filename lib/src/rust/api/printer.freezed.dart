@@ -122,11 +122,11 @@ return serial(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String host,  int port,  int timeoutMs)?  network,TResult Function( int vendorId,  int productId)?  usb,TResult Function( String port,  int baudRate)?  serial,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String host,  int port,  int timeoutMs)?  network,TResult Function( int vendorId,  int productId,  String? deviceName)?  usb,TResult Function( String port,  int baudRate)?  serial,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case PrinterConnection_Network() when network != null:
 return network(_that.host,_that.port,_that.timeoutMs);case PrinterConnection_Usb() when usb != null:
-return usb(_that.vendorId,_that.productId);case PrinterConnection_Serial() when serial != null:
+return usb(_that.vendorId,_that.productId,_that.deviceName);case PrinterConnection_Serial() when serial != null:
 return serial(_that.port,_that.baudRate);case _:
   return orElse();
 
@@ -145,11 +145,11 @@ return serial(_that.port,_that.baudRate);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String host,  int port,  int timeoutMs)  network,required TResult Function( int vendorId,  int productId)  usb,required TResult Function( String port,  int baudRate)  serial,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String host,  int port,  int timeoutMs)  network,required TResult Function( int vendorId,  int productId,  String? deviceName)  usb,required TResult Function( String port,  int baudRate)  serial,}) {final _that = this;
 switch (_that) {
 case PrinterConnection_Network():
 return network(_that.host,_that.port,_that.timeoutMs);case PrinterConnection_Usb():
-return usb(_that.vendorId,_that.productId);case PrinterConnection_Serial():
+return usb(_that.vendorId,_that.productId,_that.deviceName);case PrinterConnection_Serial():
 return serial(_that.port,_that.baudRate);}
 }
 /// A variant of `when` that fallback to returning `null`
@@ -164,11 +164,11 @@ return serial(_that.port,_that.baudRate);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String host,  int port,  int timeoutMs)?  network,TResult? Function( int vendorId,  int productId)?  usb,TResult? Function( String port,  int baudRate)?  serial,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String host,  int port,  int timeoutMs)?  network,TResult? Function( int vendorId,  int productId,  String? deviceName)?  usb,TResult? Function( String port,  int baudRate)?  serial,}) {final _that = this;
 switch (_that) {
 case PrinterConnection_Network() when network != null:
 return network(_that.host,_that.port,_that.timeoutMs);case PrinterConnection_Usb() when usb != null:
-return usb(_that.vendorId,_that.productId);case PrinterConnection_Serial() when serial != null:
+return usb(_that.vendorId,_that.productId,_that.deviceName);case PrinterConnection_Serial() when serial != null:
 return serial(_that.port,_that.baudRate);case _:
   return null;
 
@@ -251,11 +251,12 @@ as int,
 
 
 class PrinterConnection_Usb extends PrinterConnection {
-  const PrinterConnection_Usb({required this.vendorId, required this.productId}): super._();
+  const PrinterConnection_Usb({required this.vendorId, required this.productId, this.deviceName}): super._();
   
 
  final  int vendorId;
  final  int productId;
+ final  String? deviceName;
 
 /// Create a copy of PrinterConnection
 /// with the given fields replaced by the non-null parameter values.
@@ -267,16 +268,16 @@ $PrinterConnection_UsbCopyWith<PrinterConnection_Usb> get copyWith => _$PrinterC
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PrinterConnection_Usb&&(identical(other.vendorId, vendorId) || other.vendorId == vendorId)&&(identical(other.productId, productId) || other.productId == productId));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is PrinterConnection_Usb&&(identical(other.vendorId, vendorId) || other.vendorId == vendorId)&&(identical(other.productId, productId) || other.productId == productId)&&(identical(other.deviceName, deviceName) || other.deviceName == deviceName));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,vendorId,productId);
+int get hashCode => Object.hash(runtimeType,vendorId,productId,deviceName);
 
 @override
 String toString() {
-  return 'PrinterConnection.usb(vendorId: $vendorId, productId: $productId)';
+  return 'PrinterConnection.usb(vendorId: $vendorId, productId: $productId, deviceName: $deviceName)';
 }
 
 
@@ -287,7 +288,7 @@ abstract mixin class $PrinterConnection_UsbCopyWith<$Res> implements $PrinterCon
   factory $PrinterConnection_UsbCopyWith(PrinterConnection_Usb value, $Res Function(PrinterConnection_Usb) _then) = _$PrinterConnection_UsbCopyWithImpl;
 @useResult
 $Res call({
- int vendorId, int productId
+ int vendorId, int productId, String? deviceName
 });
 
 
@@ -304,11 +305,12 @@ class _$PrinterConnection_UsbCopyWithImpl<$Res>
 
 /// Create a copy of PrinterConnection
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') $Res call({Object? vendorId = null,Object? productId = null,}) {
+@pragma('vm:prefer-inline') $Res call({Object? vendorId = null,Object? productId = null,Object? deviceName = freezed,}) {
   return _then(PrinterConnection_Usb(
 vendorId: null == vendorId ? _self.vendorId : vendorId // ignore: cast_nullable_to_non_nullable
 as int,productId: null == productId ? _self.productId : productId // ignore: cast_nullable_to_non_nullable
-as int,
+as int,deviceName: freezed == deviceName ? _self.deviceName : deviceName // ignore: cast_nullable_to_non_nullable
+as String?,
   ));
 }
 

@@ -14,7 +14,12 @@ pub enum PrinterConnection {
     /// USB 打印机。
     /// vendor_id: USB 厂商 ID（十六进制，如 0x0525）
     /// product_id: USB 产品 ID（十六进制，如 0xa700）
-    Usb { vendor_id: u16, product_id: u16 },
+    /// device_name: Android UsbManager 返回的设备路径，用于区分相同 VID/PID 的设备
+    Usb {
+        vendor_id: u16,
+        product_id: u16,
+        device_name: Option<String>,
+    },
     /// 串口打印机。
     /// port: 串口路径（如 /dev/ttyUSB0、COM3）
     /// baud_rate: 波特率（常见 9600、115200）

@@ -1,3 +1,11 @@
+## 0.0.7
+
+* Add native Android USB bulk printing after `UsbManager` permission is granted.
+* Add Android USB cash drawer, ESC/POS status, identity, and serial queries.
+* Preserve Android USB device paths to distinguish printers with identical VID/PID values.
+* Add stable `errorCode` fields while retaining existing user-readable error messages.
+* Add pub.dev repository, issue tracker, and topic metadata.
+
 ## 0.0.6
 
 * Add queued ESC/POS printer status queries with raw status bytes.

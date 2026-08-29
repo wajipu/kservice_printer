@@ -491,12 +491,14 @@ class PrintResult {
     required this.ok,
     this.printed = false,
     this.bytes = 0,
+    this.errorCode,
     this.error,
   });
 
   final bool ok;
   final bool printed;
   final int bytes;
+  final String? errorCode;
   final String? error;
 
   factory PrintResult.fromJson(Map<String, dynamic> json) {
@@ -507,6 +509,7 @@ class PrintResult {
       bytes: result is Map && result['bytes'] is num
           ? (result['bytes'] as num).toInt()
           : 0,
+      errorCode: json['errorCode']?.toString(),
       error: json['error']?.toString(),
     );
   }
@@ -531,6 +534,7 @@ class PrinterStatus {
     required this.raw,
     required this.rawHex,
     required this.timeoutMs,
+    this.errorCode,
     this.message,
   });
 
@@ -550,13 +554,17 @@ class PrinterStatus {
   final Map<int, int> raw;
   final Map<String, String> rawHex;
   final int timeoutMs;
+  final String? errorCode;
   final String? message;
 
   bool get ready => ok;
 
   factory PrinterStatus.fromJson(Map<String, dynamic> json) {
     if (json['ok'] != true) {
-      return PrinterStatus.unavailable(message: json['error']?.toString());
+      return PrinterStatus.unavailable(
+        errorCode: json['errorCode']?.toString(),
+        message: json['error']?.toString(),
+      );
     }
     final result = json['result'];
     if (result is! Map<String, dynamic>) {
@@ -584,12 +592,14 @@ class PrinterStatus {
     );
   }
 
-  const factory PrinterStatus.unavailable({String? message}) =
-      _UnavailablePrinterStatus;
+  const factory PrinterStatus.unavailable({
+    String? errorCode,
+    String? message,
+  }) = _UnavailablePrinterStatus;
 }
 
 class _UnavailablePrinterStatus extends PrinterStatus {
-  const _UnavailablePrinterStatus({super.message})
+  const _UnavailablePrinterStatus({super.errorCode, super.message})
     : super(
         ok: false,
         supported: false,
@@ -621,6 +631,7 @@ class PrinterIdentity {
     this.firmware,
     this.raw = const {},
     this.timeoutMs = 0,
+    this.errorCode,
     this.error,
   });
 
@@ -632,6 +643,7 @@ class PrinterIdentity {
   final String? firmware;
   final Map<String, String> raw;
   final int timeoutMs;
+  final String? errorCode;
   final String? error;
 
   String get displayName {
@@ -648,6 +660,7 @@ class PrinterIdentity {
       return PrinterIdentity(
         ok: false,
         supported: false,
+        errorCode: json['errorCode']?.toString(),
         error: json['error']?.toString(),
       );
     }
@@ -756,12 +769,14 @@ class RenderResult {
     required this.ok,
     this.hex = '',
     this.length = 0,
+    this.errorCode,
     this.error,
   });
 
   final bool ok;
   final String hex;
   final int length;
+  final String? errorCode;
   final String? error;
 
   factory RenderResult.fromJson(Map<String, dynamic> json) {
@@ -772,6 +787,7 @@ class RenderResult {
       length: result is Map && result['length'] is num
           ? (result['length'] as num).toInt()
           : 0,
+      errorCode: json['errorCode']?.toString(),
       error: json['error']?.toString(),
     );
   }
@@ -816,8 +832,11 @@ class UsbPrinterInfo {
     return '$label · $vendorIdHex/$productIdHex';
   }
 
-  PrinterConnection get connection =>
-      PrinterConnection.usb(vendorId: vendorId, productId: productId);
+  PrinterConnection get connection => PrinterConnection.usb(
+    vendorId: vendorId,
+    productId: productId,
+    deviceName: platformDeviceId,
+  );
 
   factory UsbPrinterInfo.fromJson(Map<String, dynamic> json) {
     return UsbPrinterInfo(
@@ -1196,9 +1215,102 @@ extension PrinterConnectionQueueKey on PrinterConnection {
   /// 同一个 key 的任务会串行执行；不同 key 的任务可以并行。
   String get queueKey => when(
     network: (host, port, timeoutMs) => 'network:$host:$port',
-    usb: (vendorId, productId) => 'usb:$vendorId:$productId',
+    usb: (vendorId, productId, deviceName) =>
+        'usb:$vendorId:$productId${deviceName == null ? '' : ':$deviceName'}',
     serial: (port, baudRate) => 'serial:$port:$baudRate',
   );
+}
+
+class _AndroidUsbTarget {
+  const _AndroidUsbTarget({
+    required this.vendorId,
+    required this.productId,
+    this.deviceName,
+  });
+
+  final int vendorId;
+  final int productId;
+  final String? deviceName;
+
+  Map<String, Object?> toArguments({int? timeoutMs}) => {
+    'vendorId': vendorId,
+    'productId': productId,
+    'deviceName': ?deviceName,
+    'timeoutMs': ?timeoutMs,
+  };
+}
+
+_AndroidUsbTarget? _androidUsbTarget(PrinterConnection connection) {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return null;
+  }
+  return connection.when<_AndroidUsbTarget?>(
+    network: (host, port, timeoutMs) => null,
+    usb: (vendorId, productId, deviceName) => _AndroidUsbTarget(
+      vendorId: vendorId,
+      productId: productId,
+      deviceName: deviceName,
+    ),
+    serial: (port, baudRate) => null,
+  );
+}
+
+Future<Map<String, dynamic>> _invokeAndroidUsb(
+  String method,
+  _AndroidUsbTarget target, {
+  int? timeoutMs,
+  Uint8List? data,
+}) async {
+  try {
+    final response = await _platformChannel.invokeMethod<String>(method, {
+      ...target.toArguments(timeoutMs: timeoutMs),
+      'data': ?data,
+    });
+    if (response == null || response.isEmpty) {
+      return const {
+        'ok': false,
+        'errorCode': 'empty_response',
+        'error': 'Android USB 操作未返回结果',
+      };
+    }
+    final decoded = jsonDecode(response);
+    if (decoded is Map) {
+      return Map<String, dynamic>.from(decoded);
+    }
+    return const {
+      'ok': false,
+      'errorCode': 'invalid_response',
+      'error': 'Android USB 操作返回格式无效',
+    };
+  } on PlatformException catch (error) {
+    return {
+      'ok': false,
+      'errorCode': error.code,
+      'error': error.message ?? 'Android USB 平台调用失败',
+    };
+  } on FormatException catch (error) {
+    return {
+      'ok': false,
+      'errorCode': 'invalid_response',
+      'error': 'Android USB 响应解析失败: ${error.message}',
+    };
+  }
+}
+
+Uint8List _decodeHexBytes(String value) {
+  if (value.length.isOdd) {
+    throw const FormatException('hex 字节长度必须为偶数');
+  }
+  final bytes = Uint8List(value.length ~/ 2);
+  for (var index = 0; index < bytes.length; index += 1) {
+    final start = index * 2;
+    final byte = int.tryParse(value.substring(start, start + 2), radix: 16);
+    if (byte == null) {
+      throw FormatException('hex 字节无效，位置: $start');
+    }
+    bytes[index] = byte;
+  }
+  return bytes;
 }
 
 /// 当前仍有待执行任务的打印机队列数量。
@@ -1221,6 +1333,33 @@ Future<PrintResult> printReceipt(PrintJob job, {bool queued = true}) {
 ///
 /// 只有在调用方已经自行保证同一台打印机串行时才建议使用。
 Future<PrintResult> printReceiptNow(PrintJob job) async {
+  final androidUsb = _androidUsbTarget(job.connection);
+  if (androidUsb != null) {
+    final rendered = await renderReceipt(job);
+    if (!rendered.ok) {
+      return PrintResult(
+        ok: false,
+        errorCode: rendered.errorCode,
+        error: rendered.error,
+      );
+    }
+    try {
+      final response = await _invokeAndroidUsb(
+        'writeUsbPrinter',
+        androidUsb,
+        timeoutMs: 5000,
+        data: _decodeHexBytes(rendered.hex),
+      );
+      return PrintResult.fromJson(response);
+    } on FormatException catch (error) {
+      return PrintResult(
+        ok: false,
+        errorCode: 'invalid_render_bytes',
+        error: '打印指令解析失败: ${error.message}',
+      );
+    }
+  }
+
   await initKservicePrinter();
   final response = await rust_printer.printReceipt(
     connection: job.connection,
@@ -1257,6 +1396,23 @@ Future<PrintResult> openCashDrawerNow(
   Duration on = const Duration(milliseconds: 200),
   Duration off = const Duration(milliseconds: 200),
 }) async {
+  final androidUsb = _androidUsbTarget(connection);
+  if (androidUsb != null) {
+    final response = await _invokeAndroidUsb(
+      'writeUsbPrinter',
+      androidUsb,
+      timeoutMs: 5000,
+      data: Uint8List.fromList([
+        0x1b,
+        0x70,
+        pin.code,
+        (_cashDrawerDurationMs(on) + 1) ~/ 2,
+        (_cashDrawerDurationMs(off) + 1) ~/ 2,
+      ]),
+    );
+    return PrintResult.fromJson(response);
+  }
+
   await initKservicePrinter();
   final response = await rust_printer.openCashDrawer(
     connection: connection,
@@ -1292,6 +1448,16 @@ Future<PrinterStatus> queryPrinterStatusNow(
   PrinterConnection connection, {
   Duration timeout = const Duration(seconds: 2),
 }) async {
+  final androidUsb = _androidUsbTarget(connection);
+  if (androidUsb != null) {
+    final response = await _invokeAndroidUsb(
+      'queryUsbPrinterStatus',
+      androidUsb,
+      timeoutMs: _queryTimeoutMs(timeout),
+    );
+    return PrinterStatus.fromJson(response);
+  }
+
   await initKservicePrinter();
   final response = await rust_printer.queryPrinterStatus(
     connection: connection,
@@ -1320,6 +1486,16 @@ Future<PrinterIdentity> getPrinterIdentityNow(
   PrinterConnection connection, {
   Duration timeout = const Duration(seconds: 2),
 }) async {
+  final androidUsb = _androidUsbTarget(connection);
+  if (androidUsb != null) {
+    final response = await _invokeAndroidUsb(
+      'getUsbPrinterIdentity',
+      androidUsb,
+      timeoutMs: _queryTimeoutMs(timeout),
+    );
+    return PrinterIdentity.fromJson(response);
+  }
+
   await initKservicePrinter();
   final response = await rust_printer.getPrinterIdentity(
     connection: connection,
