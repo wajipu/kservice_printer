@@ -1,3 +1,9 @@
+## 0.0.8
+
+* Add Rust-worker PNG Base64 rendering for short-lived image print pipelines.
+* Add explicit app font-file registration shared by receipt and TSPL/ZPL image renderers.
+* Reuse the configured font system instead of relying only on Android system fonts.
+
 ## 0.0.7
 
 * Add native Android USB bulk printing after `UsbManager` permission is granted.

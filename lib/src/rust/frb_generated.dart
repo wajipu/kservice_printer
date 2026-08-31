@@ -35,8 +35,12 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 
   /// Initialize flutter_rust_bridge in mock mode.
   /// No libraries for FFI are loaded.
-  static void initMock({required RustLibApi api}) {
-    instance.initMockImpl(api: api);
+  static void initMock({
+    required RustLibApi api,
+  }) {
+    instance.initMockImpl(
+      api: api,
+    );
   }
 
   /// Dispose flutter_rust_bridge
@@ -66,54 +70,50 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 1320437732;
+  int get rustContentHash => 2036642898;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
-        stem: 'kservice_printer_core',
-        ioDirectory: 'rust_printer_core/target/release/',
-        webPrefix: 'pkg/',
-        wasmBindgenName: 'wasm_bindgen',
-      );
+    stem: 'kservice_printer_core',
+    ioDirectory: 'rust_printer_core/target/release/',
+    webPrefix: 'pkg/',
+    wasmBindgenName: 'wasm_bindgen',
+  );
 }
 
 abstract class RustLibApi extends BaseApi {
-  Future<String> crateApiPrinterDiscoverNetworkPrinters({
-    required int timeoutMs,
-    required List<String> serviceTypes,
-  });
+  Future<String> crateApiPrinterConfigurePrinterImageFonts(
+      {required List<String> fontPaths});
 
-  Future<String> crateApiPrinterGetPrinterIdentity({
-    required PrinterConnection connection,
-    required int timeoutMs,
-  });
+  Future<String> crateApiPrinterDiscoverNetworkPrinters(
+      {required int timeoutMs, required List<String> serviceTypes});
+
+  Future<String> crateApiPrinterGetPrinterIdentity(
+      {required PrinterConnection connection, required int timeoutMs});
 
   Future<void> crateApiPrinterInitApp();
 
   Future<String> crateApiPrinterListUsbPrinters();
 
-  Future<String> crateApiPrinterOpenCashDrawer({
-    required PrinterConnection connection,
-    required int pin,
-    required int onMs,
-    required int offMs,
-  });
+  Future<String> crateApiPrinterOpenCashDrawer(
+      {required PrinterConnection connection,
+      required int pin,
+      required int onMs,
+      required int offMs});
 
-  Future<String> crateApiPrinterPrintReceipt({
-    required PrinterConnection connection,
-    required String templateJson,
-    required String dataJson,
-  });
+  Future<String> crateApiPrinterPrintReceipt(
+      {required PrinterConnection connection,
+      required String templateJson,
+      required String dataJson});
 
-  Future<String> crateApiPrinterQueryPrinterStatus({
-    required PrinterConnection connection,
-    required int timeoutMs,
-  });
+  Future<String> crateApiPrinterQueryPrinterStatus(
+      {required PrinterConnection connection, required int timeoutMs});
 
-  Future<String> crateApiPrinterRenderReceipt({
-    required String templateJson,
-    required String dataJson,
-  });
+  Future<String> crateApiPrinterRenderReceipt(
+      {required String templateJson, required String dataJson});
+
+  Future<String> crateApiPrinterRenderReceiptImageBase64(
+      {required String templateJson, required String dataJson});
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -125,32 +125,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
-  Future<String> crateApiPrinterDiscoverNetworkPrinters({
-    required int timeoutMs,
-    required List<String> serviceTypes,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
-          sse_encode_list_String(serviceTypes, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 1,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterDiscoverNetworkPrintersConstMeta,
-        argValues: [timeoutMs, serviceTypes],
-        apiImpl: this,
+  Future<String> crateApiPrinterConfigurePrinterImageFonts(
+      {required List<String> fontPaths}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_list_String(fontPaths, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 1, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterConfigurePrinterImageFontsConstMeta,
+      argValues: [fontPaths],
+      apiImpl: this,
+    ));
+  }
+
+  TaskConstMeta get kCrateApiPrinterConfigurePrinterImageFontsConstMeta =>
+      const TaskConstMeta(
+        debugName: "configure_printer_image_fonts",
+        argNames: ["fontPaths"],
+      );
+
+  @override
+  Future<String> crateApiPrinterDiscoverNetworkPrinters(
+      {required int timeoutMs, required List<String> serviceTypes}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
+        sse_encode_list_String(serviceTypes, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 2, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
+      ),
+      constMeta: kCrateApiPrinterDiscoverNetworkPrintersConstMeta,
+      argValues: [timeoutMs, serviceTypes],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterDiscoverNetworkPrintersConstMeta =>
@@ -160,32 +178,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<String> crateApiPrinterGetPrinterIdentity({
-    required PrinterConnection connection,
-    required int timeoutMs,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_box_autoadd_printer_connection(connection, serializer);
-          sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 2,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterGetPrinterIdentityConstMeta,
-        argValues: [connection, timeoutMs],
-        apiImpl: this,
+  Future<String> crateApiPrinterGetPrinterIdentity(
+      {required PrinterConnection connection, required int timeoutMs}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_box_autoadd_printer_connection(connection, serializer);
+        sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 3, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterGetPrinterIdentityConstMeta,
+      argValues: [connection, timeoutMs],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterGetPrinterIdentityConstMeta =>
@@ -196,89 +206,75 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<void> crateApiPrinterInitApp() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 3,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterInitAppConstMeta,
-        argValues: [],
-        apiImpl: this,
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 4, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_unit,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterInitAppConstMeta,
+      argValues: [],
+      apiImpl: this,
+    ));
   }
 
-  TaskConstMeta get kCrateApiPrinterInitAppConstMeta =>
-      const TaskConstMeta(debugName: "init_app", argNames: []);
+  TaskConstMeta get kCrateApiPrinterInitAppConstMeta => const TaskConstMeta(
+        debugName: "init_app",
+        argNames: [],
+      );
 
   @override
   Future<String> crateApiPrinterListUsbPrinters() {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 4,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterListUsbPrintersConstMeta,
-        argValues: [],
-        apiImpl: this,
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 5, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterListUsbPrintersConstMeta,
+      argValues: [],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterListUsbPrintersConstMeta =>
-      const TaskConstMeta(debugName: "list_usb_printers", argNames: []);
+      const TaskConstMeta(
+        debugName: "list_usb_printers",
+        argNames: [],
+      );
 
   @override
-  Future<String> crateApiPrinterOpenCashDrawer({
-    required PrinterConnection connection,
-    required int pin,
-    required int onMs,
-    required int offMs,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_box_autoadd_printer_connection(connection, serializer);
-          sse_encode_u_8(pin, serializer);
-          sse_encode_u_16(onMs, serializer);
-          sse_encode_u_16(offMs, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 5,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterOpenCashDrawerConstMeta,
-        argValues: [connection, pin, onMs, offMs],
-        apiImpl: this,
+  Future<String> crateApiPrinterOpenCashDrawer(
+      {required PrinterConnection connection,
+      required int pin,
+      required int onMs,
+      required int offMs}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_box_autoadd_printer_connection(connection, serializer);
+        sse_encode_u_8(pin, serializer);
+        sse_encode_u_16(onMs, serializer);
+        sse_encode_u_16(offMs, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 6, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterOpenCashDrawerConstMeta,
+      argValues: [connection, pin, onMs, offMs],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterOpenCashDrawerConstMeta =>
@@ -288,34 +284,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<String> crateApiPrinterPrintReceipt({
-    required PrinterConnection connection,
-    required String templateJson,
-    required String dataJson,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_box_autoadd_printer_connection(connection, serializer);
-          sse_encode_String(templateJson, serializer);
-          sse_encode_String(dataJson, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 6,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterPrintReceiptConstMeta,
-        argValues: [connection, templateJson, dataJson],
-        apiImpl: this,
+  Future<String> crateApiPrinterPrintReceipt(
+      {required PrinterConnection connection,
+      required String templateJson,
+      required String dataJson}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_box_autoadd_printer_connection(connection, serializer);
+        sse_encode_String(templateJson, serializer);
+        sse_encode_String(dataJson, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 7, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterPrintReceiptConstMeta,
+      argValues: [connection, templateJson, dataJson],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterPrintReceiptConstMeta =>
@@ -325,32 +314,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<String> crateApiPrinterQueryPrinterStatus({
-    required PrinterConnection connection,
-    required int timeoutMs,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_box_autoadd_printer_connection(connection, serializer);
-          sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 7,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterQueryPrinterStatusConstMeta,
-        argValues: [connection, timeoutMs],
-        apiImpl: this,
+  Future<String> crateApiPrinterQueryPrinterStatus(
+      {required PrinterConnection connection, required int timeoutMs}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_box_autoadd_printer_connection(connection, serializer);
+        sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 8, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterQueryPrinterStatusConstMeta,
+      argValues: [connection, timeoutMs],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterQueryPrinterStatusConstMeta =>
@@ -360,32 +341,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<String> crateApiPrinterRenderReceipt({
-    required String templateJson,
-    required String dataJson,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(templateJson, serializer);
-          sse_encode_String(dataJson, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 8,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiPrinterRenderReceiptConstMeta,
-        argValues: [templateJson, dataJson],
-        apiImpl: this,
+  Future<String> crateApiPrinterRenderReceipt(
+      {required String templateJson, required String dataJson}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_String(templateJson, serializer);
+        sse_encode_String(dataJson, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 9, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
       ),
-    );
+      constMeta: kCrateApiPrinterRenderReceiptConstMeta,
+      argValues: [templateJson, dataJson],
+      apiImpl: this,
+    ));
   }
 
   TaskConstMeta get kCrateApiPrinterRenderReceiptConstMeta =>
@@ -394,12 +367,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         argNames: ["templateJson", "dataJson"],
       );
 
+  @override
+  Future<String> crateApiPrinterRenderReceiptImageBase64(
+      {required String templateJson, required String dataJson}) {
+    return handler.executeNormal(NormalTask(
+      callFfi: (port_) {
+        final serializer = SseSerializer(generalizedFrbRustBinding);
+        sse_encode_String(templateJson, serializer);
+        sse_encode_String(dataJson, serializer);
+        pdeCallFfi(generalizedFrbRustBinding, serializer,
+            funcId: 10, port: port_);
+      },
+      codec: SseCodec(
+        decodeSuccessData: sse_decode_String,
+        decodeErrorData: null,
+      ),
+      constMeta: kCrateApiPrinterRenderReceiptImageBase64ConstMeta,
+      argValues: [templateJson, dataJson],
+      apiImpl: this,
+    ));
+  }
+
+  TaskConstMeta get kCrateApiPrinterRenderReceiptImageBase64ConstMeta =>
+      const TaskConstMeta(
+        debugName: "render_receipt_image_base64",
+        argNames: ["templateJson", "dataJson"],
+      );
+
   @protected
   int dco_decode_CastedPrimitive_u_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     throw UnimplementedError(
-      'Not implemented in this codec, please use the other one',
-    );
+        'Not implemented in this codec, please use the other one');
   }
 
   @protected
@@ -504,8 +503,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   PrinterConnection sse_decode_box_autoadd_printer_connection(
-    SseDeserializer deserializer,
-  ) {
+      SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_printer_connection(deserializer));
   }
@@ -542,8 +540,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   PrinterConnection sse_decode_printer_connection(
-    SseDeserializer deserializer,
-  ) {
+      SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     var tag_ = sse_decode_i_32(deserializer);
@@ -553,19 +550,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_port = sse_decode_u_16(deserializer);
         var var_timeoutMs = sse_decode_CastedPrimitive_u_64(deserializer);
         return PrinterConnection_Network(
-          host: var_host,
-          port: var_port,
-          timeoutMs: var_timeoutMs,
-        );
+            host: var_host, port: var_port, timeoutMs: var_timeoutMs);
       case 1:
         var var_vendorId = sse_decode_u_16(deserializer);
         var var_productId = sse_decode_u_16(deserializer);
         var var_deviceName = sse_decode_opt_String(deserializer);
         return PrinterConnection_Usb(
-          vendorId: var_vendorId,
-          productId: var_productId,
-          deviceName: var_deviceName,
-        );
+            vendorId: var_vendorId,
+            productId: var_productId,
+            deviceName: var_deviceName);
       case 2:
         var var_port = sse_decode_String(deserializer);
         var var_baudRate = sse_decode_u_32(deserializer);
@@ -630,9 +623,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void sse_encode_box_autoadd_printer_connection(
-    PrinterConnection self,
-    SseSerializer serializer,
-  ) {
+      PrinterConnection self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_printer_connection(self, serializer);
   }
@@ -648,9 +639,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void sse_encode_list_prim_u_8_strict(
-    Uint8List self,
-    SseSerializer serializer,
-  ) {
+      Uint8List self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
@@ -668,25 +657,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void sse_encode_printer_connection(
-    PrinterConnection self,
-    SseSerializer serializer,
-  ) {
+      PrinterConnection self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     switch (self) {
       case PrinterConnection_Network(
-        host: final host,
-        port: final port,
-        timeoutMs: final timeoutMs,
-      ):
+          host: final host,
+          port: final port,
+          timeoutMs: final timeoutMs
+        ):
         sse_encode_i_32(0, serializer);
         sse_encode_String(host, serializer);
         sse_encode_u_16(port, serializer);
         sse_encode_CastedPrimitive_u_64(timeoutMs, serializer);
       case PrinterConnection_Usb(
-        vendorId: final vendorId,
-        productId: final productId,
-        deviceName: final deviceName,
-      ):
+          vendorId: final vendorId,
+          productId: final productId,
+          deviceName: final deviceName
+        ):
         sse_encode_i_32(1, serializer);
         sse_encode_u_16(vendorId, serializer);
         sse_encode_u_16(productId, serializer);

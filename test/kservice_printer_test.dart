@@ -795,6 +795,16 @@ class _FakeRustApi extends RustLibApi {
   int maxActiveDiscoveries = 0;
   int discoveryCalls = 0;
 
+  @override
+  Future<String> crateApiPrinterConfigurePrinterImageFonts({
+    required List<String> fontPaths,
+  }) async {
+    return jsonEncode({
+      'ok': true,
+      'result': {'loaded': fontPaths.length},
+    });
+  }
+
   void reset() {
     startedJobIds.clear();
     drawerCalls.clear();
@@ -1008,6 +1018,17 @@ class _FakeRustApi extends RustLibApi {
     return jsonEncode({
       'ok': true,
       'result': {'bytes': '', 'length': 0},
+    });
+  }
+
+  @override
+  Future<String> crateApiPrinterRenderReceiptImageBase64({
+    required String templateJson,
+    required String dataJson,
+  }) async {
+    return jsonEncode({
+      'ok': true,
+      'result': {'imageBase64': '', 'width': 384, 'height': 8},
     });
   }
 }

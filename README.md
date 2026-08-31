@@ -358,6 +358,35 @@ final job = PrintJob(
 
 58mm 打印机建议图片宽度使用 `384px`；80mm 打印机建议使用 `576px`。高度不需要写死，按内容自然撑开即可。
 
+#### Rust 后台生成 Base64 图片
+
+需要使用 App 自带字体并避免阻塞 Flutter UI isolate 时，可以先注册字体文件，
+再让 Rust worker 把固定模板和数据生成短生命周期 PNG Base64：
+
+```dart
+await configurePrinterImageFonts([
+  '/path/to/AlibabaPuHuiTi.ttf',
+  '/path/to/AlpidaUnicodeSystem.ttf',
+]);
+
+final sourceJob = PrintJob(
+  connection: connection,
+  template: defaultOrderReceiptImageTemplate(
+    width: 32,
+    fontFamily: 'Alibaba PuHuiTi 3.0',
+  ),
+  data: orderData,
+);
+final rendered = await renderReceiptImageBase64(sourceJob);
+if (!rendered.ok || rendered.imageBase64 == null) {
+  throw StateError(rendered.error ?? 'image render failed');
+}
+```
+
+Base64 只适合作为当前打印调用的兼容边界：不要写入数据库、业务 State 或日志，
+打印 Future 完成后立即释放引用。注册的字体同时用于 ESC/POS 整票图片和
+TSPL/ZPL 图片标签，避免 Android 系统缺少维吾尔语或阿拉伯语字体时断字。
+
 #### Flutter 生成图片流
 
 Flutter 端可以用 `Canvas`、`PictureRecorder` 或 `RepaintBoundary` 生成 PNG。生成后把 `Uint8List` 转成 base64：

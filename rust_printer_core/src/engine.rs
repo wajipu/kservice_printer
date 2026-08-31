@@ -29,7 +29,8 @@ use crate::error::PrinterError;
 use crate::protocol::{tspl, zpl};
 use crate::render::encoding::{encode_printer_text, normalize_text_for_encoding};
 use crate::render::image::{
-    decode_image_base64, image_bit_option, image_bytes_bit_option, render_template_as_image,
+    configure_image_fonts, decode_image_base64, image_bit_option, image_bytes_bit_option,
+    render_template_as_image, render_template_image_base64,
 };
 use crate::render::text_layout::{format_columns, format_row, repeat_to_width};
 use crate::render::value::{hex_decode, render_value, value_ref};
@@ -177,6 +178,14 @@ pub fn render_receipt(template_json: &str, data_json: &str) -> String {
     into_response(render_receipt_inner(template_json, data_json))
 }
 
+pub fn render_receipt_image_base64(template_json: &str, data_json: &str) -> String {
+    into_response(render_receipt_image_base64_inner(template_json, data_json))
+}
+
+pub fn configure_printer_image_fonts(font_paths: Vec<String>) -> String {
+    into_response(configure_image_fonts(&font_paths).map(|loaded| json!({ "loaded": loaded })))
+}
+
 pub fn open_cash_drawer(
     connection: &PrinterConnection,
     pin: u8,
@@ -284,6 +293,18 @@ fn render_receipt_inner(template_json: &str, data_json: &str) -> Result<Value, P
     printer.print()?;
     let bytes = buf.lock().unwrap().clone();
     Ok(json!({ "bytes": hex::encode(&bytes), "length": bytes.len() }))
+}
+
+fn render_receipt_image_base64_inner(
+    template_json: &str,
+    data_json: &str,
+) -> Result<Value, PrinterError> {
+    let template = parse_template(template_json)?;
+    let data: Value =
+        serde_json::from_str(data_json).map_err(|e| PrinterError::InvalidData(e.to_string()))?;
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(no_escape);
+    render_template_image_base64(&template, &data, &handlebars)
 }
 
 fn open_cash_drawer_inner(

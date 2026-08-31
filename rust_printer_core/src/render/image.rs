@@ -13,11 +13,65 @@ use escpos::utils::*;
 use handlebars::Handlebars;
 use image::{GrayImage, Luma};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::PrinterError;
 use crate::render::text_layout::{format_columns, format_row, repeat_to_width};
 use crate::render::value::{render_value, value_ref};
 use crate::template::{Element, Template};
+
+struct ImageRendererState {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    loaded_font_paths: BTreeSet<String>,
+}
+
+static IMAGE_RENDERER: OnceLock<Mutex<ImageRendererState>> = OnceLock::new();
+
+fn image_renderer() -> &'static Mutex<ImageRendererState> {
+    IMAGE_RENDERER.get_or_init(|| {
+        Mutex::new(ImageRendererState {
+            font_system: FontSystem::new(),
+            swash_cache: SwashCache::new(),
+            loaded_font_paths: BTreeSet::new(),
+        })
+    })
+}
+
+pub(crate) fn with_image_renderer<T>(
+    callback: impl FnOnce(&mut FontSystem, &mut SwashCache) -> Result<T, PrinterError>,
+) -> Result<T, PrinterError> {
+    let mut renderer = image_renderer()
+        .lock()
+        .map_err(|_| PrinterError::ImageRender("图片字体渲染器锁已损坏".into()))?;
+    let ImageRendererState {
+        font_system,
+        swash_cache,
+        ..
+    } = &mut *renderer;
+    callback(font_system, swash_cache)
+}
+
+pub(crate) fn configure_image_fonts(font_paths: &[String]) -> Result<usize, PrinterError> {
+    let mut renderer = image_renderer()
+        .lock()
+        .map_err(|_| PrinterError::ImageRender("图片字体渲染器锁已损坏".into()))?;
+    let mut loaded = 0usize;
+    for font_path in font_paths {
+        let normalized = font_path.trim();
+        if normalized.is_empty() || renderer.loaded_font_paths.contains(normalized) {
+            continue;
+        }
+        let bytes = std::fs::read(normalized).map_err(|error| {
+            PrinterError::ImageRender(format!("读取字体 {normalized}: {error}"))
+        })?;
+        renderer.font_system.db_mut().load_font_data(bytes);
+        renderer.loaded_font_paths.insert(normalized.to_string());
+        loaded += 1;
+    }
+    Ok(loaded)
+}
 
 pub(crate) struct TempImageFile {
     path: String,
@@ -62,6 +116,31 @@ pub(crate) fn render_template_as_image<D: Driver>(
     printer.feed()?;
     printer.justify(JustifyMode::LEFT)?;
     Ok(())
+}
+
+pub(crate) fn render_template_image_base64(
+    template: &Template,
+    data: &Value,
+    handlebars: &Handlebars,
+) -> Result<Value, PrinterError> {
+    let mut lines = Vec::new();
+    collect_image_lines(
+        &template.elements,
+        data,
+        handlebars,
+        template.width,
+        &mut lines,
+    )?;
+    let temp_image = TempImageFile::new(render_lines_to_image(&lines, template)?);
+    let bytes = std::fs::read(temp_image.path())
+        .map_err(|error| PrinterError::ImageRender(error.to_string()))?;
+    let (width, height) = image::image_dimensions(temp_image.path())
+        .map_err(|error| PrinterError::ImageRender(error.to_string()))?;
+    Ok(serde_json::json!({
+        "imageBase64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        "width": width,
+        "height": height,
+    }))
 }
 
 fn collect_image_lines(
@@ -133,13 +212,19 @@ fn render_lines_to_image(lines: &[String], template: &Template) -> Result<String
     let padding = 12u32;
     let height = ((lines.len().max(1) as f32 * line_height).ceil() as u32) + padding * 2;
     let mut image = GrayImage::from_pixel(width, height, Luma([255]));
-    let mut font_system = FontSystem::new();
-    let mut swash_cache = SwashCache::new();
+    let mut renderer = image_renderer()
+        .lock()
+        .map_err(|_| PrinterError::ImageRender("图片字体渲染器锁已损坏".into()))?;
+    let ImageRendererState {
+        font_system,
+        swash_cache,
+        ..
+    } = &mut *renderer;
     let metrics = Metrics::new(font_size, line_height);
-    let mut buffer = Buffer::new(&mut font_system, metrics);
+    let mut buffer = Buffer::new(font_system, metrics);
 
     buffer.set_size(
-        &mut font_system,
+        font_system,
         Some((width - padding * 2) as f32),
         Some(height as f32),
     );
@@ -149,11 +234,11 @@ fn render_lines_to_image(lines: &[String], template: &Template) -> Result<String
             attrs = attrs.family(Family::Name(font_family));
         }
     }
-    buffer.set_text(&mut font_system, &text, &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(&mut font_system, false);
+    buffer.set_text(font_system, &text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
     buffer.draw(
-        &mut font_system,
-        &mut swash_cache,
+        font_system,
+        swash_cache,
         Color::rgb(0, 0, 0),
         |x, y, w, h, color| {
             let alpha = (color.0 >> 24) as u8;

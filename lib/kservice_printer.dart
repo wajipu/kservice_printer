@@ -793,6 +793,54 @@ class RenderResult {
   }
 }
 
+/// Rust 后台线程生成的短生命周期 PNG 图片结果。
+class PrinterImageRenderResult {
+  /// 创建图片渲染结果。
+  const PrinterImageRenderResult({
+    required this.ok,
+    this.imageBase64,
+    this.width = 0,
+    this.height = 0,
+    this.errorCode,
+    this.error,
+  });
+
+  /// true 表示图片已经成功生成。
+  final bool ok;
+
+  /// PNG Base64；调用方完成打印后应立即释放引用，禁止持久化或记录日志。
+  final String? imageBase64;
+
+  /// 图片像素宽度。
+  final int width;
+
+  /// 图片像素高度。
+  final int height;
+
+  /// 稳定错误码。
+  final String? errorCode;
+
+  /// 仅用于排障的错误说明。
+  final String? error;
+
+  /// 从 Rust 统一响应解析图片渲染结果。
+  factory PrinterImageRenderResult.fromJson(Map<String, dynamic> json) {
+    final result = json['result'];
+    return PrinterImageRenderResult(
+      ok: json['ok'] == true,
+      imageBase64: result is Map ? result['imageBase64']?.toString() : null,
+      width: result is Map && result['width'] is num
+          ? (result['width'] as num).toInt()
+          : 0,
+      height: result is Map && result['height'] is num
+          ? (result['height'] as num).toInt()
+          : 0,
+      errorCode: json['errorCode']?.toString(),
+      error: json['error']?.toString(),
+    );
+  }
+}
+
 /// USB 打印机/设备信息。
 class UsbPrinterInfo {
   const UsbPrinterInfo({
@@ -1625,6 +1673,38 @@ Future<RenderResult> renderReceipt(PrintJob job) async {
     dataJson: jsonEncode(job.data),
   );
   return RenderResult.fromJson(jsonDecode(response) as Map<String, dynamic>);
+}
+
+/// 注册图片渲染使用的本地字体文件。
+///
+/// 已加载的相同路径会被 Rust 渲染器去重；返回本次新增加载的字体数量。
+Future<int> configurePrinterImageFonts(Iterable<String> fontPaths) async {
+  await initKservicePrinter();
+  final response = await rust_printer.configurePrinterImageFonts(
+    fontPaths: fontPaths.toList(growable: false),
+  );
+  final json = jsonDecode(response) as Map<String, dynamic>;
+  if (json['ok'] != true) {
+    throw StateError(json['error']?.toString() ?? '图片字体加载失败');
+  }
+  final result = json['result'];
+  return result is Map && result['loaded'] is num
+      ? (result['loaded'] as num).toInt()
+      : 0;
+}
+
+/// 在 Rust 后台线程中把固定模板和数据渲染为 PNG Base64。
+///
+/// 返回值只适合立即交给 [printJob]，调用方不得写入数据库、日志或长期状态。
+Future<PrinterImageRenderResult> renderReceiptImageBase64(PrintJob job) async {
+  await initKservicePrinter();
+  final response = await rust_printer.renderReceiptImageBase64(
+    templateJson: jsonEncode(job.template.toJson()),
+    dataJson: jsonEncode(job.data),
+  );
+  return PrinterImageRenderResult.fromJson(
+    jsonDecode(response) as Map<String, dynamic>,
+  );
 }
 
 /// 按任务类型打印。兼容 ESC/POS 小票模板和 TSPL 标签模板。

@@ -8,62 +8,54 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'printer.freezed.dart';
 
-Future<String> printReceipt({
-  required PrinterConnection connection,
-  required String templateJson,
-  required String dataJson,
-}) => RustLib.instance.api.crateApiPrinterPrintReceipt(
-  connection: connection,
-  templateJson: templateJson,
-  dataJson: dataJson,
-);
+Future<String> printReceipt(
+        {required PrinterConnection connection,
+        required String templateJson,
+        required String dataJson}) =>
+    RustLib.instance.api.crateApiPrinterPrintReceipt(
+        connection: connection, templateJson: templateJson, dataJson: dataJson);
 
-Future<String> renderReceipt({
-  required String templateJson,
-  required String dataJson,
-}) => RustLib.instance.api.crateApiPrinterRenderReceipt(
-  templateJson: templateJson,
-  dataJson: dataJson,
-);
+Future<String> renderReceipt(
+        {required String templateJson, required String dataJson}) =>
+    RustLib.instance.api.crateApiPrinterRenderReceipt(
+        templateJson: templateJson, dataJson: dataJson);
 
-Future<String> openCashDrawer({
-  required PrinterConnection connection,
-  required int pin,
-  required int onMs,
-  required int offMs,
-}) => RustLib.instance.api.crateApiPrinterOpenCashDrawer(
-  connection: connection,
-  pin: pin,
-  onMs: onMs,
-  offMs: offMs,
-);
+/// 将固定模板和数据在 Rust 后台线程中渲染为 PNG Base64。
+Future<String> renderReceiptImageBase64(
+        {required String templateJson, required String dataJson}) =>
+    RustLib.instance.api.crateApiPrinterRenderReceiptImageBase64(
+        templateJson: templateJson, dataJson: dataJson);
 
-Future<String> queryPrinterStatus({
-  required PrinterConnection connection,
-  required int timeoutMs,
-}) => RustLib.instance.api.crateApiPrinterQueryPrinterStatus(
-  connection: connection,
-  timeoutMs: timeoutMs,
-);
+/// 注册图片渲染使用的 App 字体文件。
+Future<String> configurePrinterImageFonts({required List<String> fontPaths}) =>
+    RustLib.instance.api
+        .crateApiPrinterConfigurePrinterImageFonts(fontPaths: fontPaths);
 
-Future<String> getPrinterIdentity({
-  required PrinterConnection connection,
-  required int timeoutMs,
-}) => RustLib.instance.api.crateApiPrinterGetPrinterIdentity(
-  connection: connection,
-  timeoutMs: timeoutMs,
-);
+Future<String> openCashDrawer(
+        {required PrinterConnection connection,
+        required int pin,
+        required int onMs,
+        required int offMs}) =>
+    RustLib.instance.api.crateApiPrinterOpenCashDrawer(
+        connection: connection, pin: pin, onMs: onMs, offMs: offMs);
+
+Future<String> queryPrinterStatus(
+        {required PrinterConnection connection, required int timeoutMs}) =>
+    RustLib.instance.api.crateApiPrinterQueryPrinterStatus(
+        connection: connection, timeoutMs: timeoutMs);
+
+Future<String> getPrinterIdentity(
+        {required PrinterConnection connection, required int timeoutMs}) =>
+    RustLib.instance.api.crateApiPrinterGetPrinterIdentity(
+        connection: connection, timeoutMs: timeoutMs);
 
 Future<String> listUsbPrinters() =>
     RustLib.instance.api.crateApiPrinterListUsbPrinters();
 
-Future<String> discoverNetworkPrinters({
-  required int timeoutMs,
-  required List<String> serviceTypes,
-}) => RustLib.instance.api.crateApiPrinterDiscoverNetworkPrinters(
-  timeoutMs: timeoutMs,
-  serviceTypes: serviceTypes,
-);
+Future<String> discoverNetworkPrinters(
+        {required int timeoutMs, required List<String> serviceTypes}) =>
+    RustLib.instance.api.crateApiPrinterDiscoverNetworkPrinters(
+        timeoutMs: timeoutMs, serviceTypes: serviceTypes);
 
 @freezed
 sealed class PrinterConnection with _$PrinterConnection {

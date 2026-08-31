@@ -17,6 +17,7 @@ use qrcode::QrCode;
 
 use crate::error::PrinterError;
 use crate::render::encoding::encode_printer_text;
+use crate::render::image::with_image_renderer;
 use crate::render::text_layout::{format_columns, format_row};
 use crate::render::value::{hex_decode, render_value, value_ref};
 use crate::template::{Align, BarcodeKind, Element, Template, TextSize};
@@ -350,20 +351,17 @@ pub(crate) fn render_template_to_label_image(
     let mut image = GrayImage::from_pixel(width.max(8), height.max(8), Luma([255]));
     let mut y = TSPL_MARGIN_Y;
 
-    // Load system fonts once for all text rendering on this label.
-    let mut font_system = FontSystem::new();
-    font_system.db_mut().load_system_fonts();
-    let mut swash_cache = SwashCache::new();
-
-    let mut context = LabelImageRenderContext {
-        image: &mut image,
-        y: &mut y,
-        handlebars,
-        template,
-        font_system: &mut font_system,
-        swash_cache: &mut swash_cache,
-    };
-    render_tspl_image_elements(&mut context, &template.elements, data)?;
+    with_image_renderer(|font_system, swash_cache| {
+        let mut context = LabelImageRenderContext {
+            image: &mut image,
+            y: &mut y,
+            handlebars,
+            template,
+            font_system,
+            swash_cache,
+        };
+        render_tspl_image_elements(&mut context, &template.elements, data)
+    })?;
     Ok(image)
 }
 

@@ -38,6 +38,16 @@ pub fn render_receipt(template_json: String, data_json: String) -> String {
     engine::render_receipt(&template_json, &data_json)
 }
 
+/// 将固定模板和数据在 Rust 后台线程中渲染为 PNG Base64。
+pub fn render_receipt_image_base64(template_json: String, data_json: String) -> String {
+    engine::render_receipt_image_base64(&template_json, &data_json)
+}
+
+/// 注册图片渲染使用的 App 字体文件。
+pub fn configure_printer_image_fonts(font_paths: Vec<String>) -> String {
+    engine::configure_printer_image_fonts(font_paths)
+}
+
 pub fn open_cash_drawer(connection: PrinterConnection, pin: u8, on_ms: u16, off_ms: u16) -> String {
     engine::open_cash_drawer(&connection, pin, on_ms, off_ms)
 }
